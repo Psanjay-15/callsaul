@@ -7,6 +7,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from app.clients.deepgram import create_deepgram_client
 from app.config.settings import settings
+from app.conversation import ConversationState
 from app.services.llm import LLMService
 from app.services.tts import TTSService
 
@@ -15,6 +16,7 @@ class TranscriptionService:
     def __init__(self, websocket: WebSocket) -> None:
         self.websocket = websocket
         self.send_lock = asyncio.Lock()
+        self.state = ConversationState()
         self.llm = LLMService()
         self.tts = TTSService(self.send_audio, self.send)
         self.connection_context = None
@@ -31,6 +33,7 @@ class TranscriptionService:
                 "message": "WebSocket connection established.",
             }
         )
+        await self.send_conversation_state()
 
         try:
             while True:
@@ -278,6 +281,14 @@ class TranscriptionService:
     async def send(self, payload: dict) -> None:
         async with self.send_lock:
             await self.websocket.send_json(payload)
+
+    async def send_conversation_state(self) -> None:
+        await self.send(
+            {
+                "type": "conversation_state",
+                **self.state.to_dict(),
+            }
+        )
 
     async def send_audio(self, audio: bytes) -> None:
         async with self.send_lock:

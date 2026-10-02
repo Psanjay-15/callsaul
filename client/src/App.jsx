@@ -20,6 +20,7 @@ export default function App() {
   const {
     audioStats,
     connect,
+    conversationStage,
     disconnect,
     error: websocketError,
     finalTranscripts,
@@ -123,6 +124,11 @@ export default function App() {
                 <span>OpenAI: {llmStatus}</span>
                 <span>Deepgram TTS: {ttsStatus}</span>
                 <span>Playback: {playbackStatus}</span>
+              </div>
+              <div className="audio-stats">
+                <span>
+                  Conversation: {conversationStage.replaceAll("_", " ")}
+                </span>
               </div>
               <button
                 className={isRecording ? "stop-recording-button" : "recording-button"}
