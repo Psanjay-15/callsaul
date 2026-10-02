@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
-
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
 function getWebSocketUrl(sessionId) {
   const url = new URL(API_BASE_URL);
@@ -12,7 +11,6 @@ function getWebSocketUrl(sessionId) {
   if (sessionId) url.searchParams.set("session_id", sessionId);
   return url.toString();
 }
-
 
 export function useWebSocket({
   onAudio,
@@ -42,11 +40,26 @@ export function useWebSocket({
     socketRef.current = null;
 
     if (socket?.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: "stop" }));
-    } else {
-      socket?.close();
+      try {
+        socket.send(JSON.stringify({ type: "stop" }));
+      } catch {
+        // The connection may already be closing; stopping is best effort.
+      }
+      try {
+        socket.close(1000, "Conversation stopped");
+      } catch {
+        // The socket may already be closed.
+      }
+    } else if (socket) {
+      try {
+        socket.close();
+      } catch {
+        // The socket may already be closed.
+      }
     }
 
+    setSessionId("");
+    setSessionResumed(false);
     setStatus("disconnected");
     setSttStatus("disconnected");
     setTtsStatus("disconnected");
@@ -54,180 +67,206 @@ export function useWebSocket({
     setConversationStage("not_started");
   }, []);
 
-  const connect = useCallback((requestedSessionId = "") => {
-    if (socketRef.current) return Promise.resolve(false);
+  const connect = useCallback(
+    (requestedSessionId = "") => {
+      if (socketRef.current) return Promise.resolve(false);
 
-    setError("");
-    setMessages([]);
-    setAudioStats({ chunks: 0, bytes: 0 });
-    setFinalTranscripts([]);
-    setLiveTranscript("");
-    setSttStatus("disconnected");
-    setLlmStatus("idle");
-    setTtsStatus("idle");
-    setBackendStatus("idle");
-    setConversationStage("not_started");
-    setTurnEvent("idle");
-    assistantMessageIdRef.current = null;
-    setStatus("connecting");
+      setError("");
+      setMessages([]);
+      setAudioStats({ chunks: 0, bytes: 0 });
+      setFinalTranscripts([]);
+      setLiveTranscript("");
+      setSttStatus("disconnected");
+      setLlmStatus("idle");
+      setTtsStatus("idle");
+      setBackendStatus("idle");
+      setConversationStage("not_started");
+      setTurnEvent("idle");
+      assistantMessageIdRef.current = null;
+      setStatus("connecting");
 
-    const socket = new WebSocket(getWebSocketUrl(requestedSessionId));
-    socket.binaryType = "arraybuffer";
-    socketRef.current = socket;
+      const socket = new WebSocket(getWebSocketUrl(requestedSessionId));
+      socket.binaryType = "arraybuffer";
+      socketRef.current = socket;
 
-    return new Promise((resolve) => {
-      let connectionSettled = false;
-      const settleConnection = (connected) => {
-        if (connectionSettled) return;
-        connectionSettled = true;
-        resolve(connected);
-      };
+      return new Promise((resolve) => {
+        let connectionSettled = false;
+        const settleConnection = (connected) => {
+          if (connectionSettled) return;
+          connectionSettled = true;
+          resolve(connected);
+        };
 
-      socket.onopen = () => {
-        setStatus("connected");
-        settleConnection(true);
-      };
+        socket.onopen = () => {
+          if (socketRef.current !== socket) {
+            socket.close(1000, "Conversation stopped");
+            settleConnection(false);
+            return;
+          }
+          setStatus("connected");
+          settleConnection(true);
+        };
 
-      socket.onmessage = (event) => {
-      if (event.data instanceof ArrayBuffer) {
-        onAudio?.(event.data);
-        return;
-      }
+        socket.onmessage = (event) => {
+          if (socketRef.current !== socket) return;
 
-      const payload = JSON.parse(event.data);
+          if (event.data instanceof ArrayBuffer) {
+            onAudio?.(event.data);
+            return;
+          }
 
-      if (payload.type === "session") {
-        setSessionId(payload.session_id);
-        setSessionResumed(payload.resumed);
-        onConversationUpdated?.();
-      }
+          const payload = JSON.parse(event.data);
 
-      if (payload.type === "conversation_history") {
-        setMessages(payload.messages);
-      }
+          if (payload.type === "session") {
+            setSessionId(payload.session_id);
+            setSessionResumed(payload.resumed);
+            onConversationUpdated?.();
+          }
 
-      if (payload.type === "message") {
-        setMessages((current) => [
-          ...current,
-          { id: crypto.randomUUID(), role: "server", text: payload.message },
-        ]);
-      }
+          if (payload.type === "conversation_history") {
+            setMessages(payload.messages);
+          }
 
-      if (payload.type === "conversation_state") {
-        setConversationStage(payload.stage);
-      }
-
-      if (payload.type === "backend_status") {
-        setBackendStatus(payload.status);
-      }
-
-      if (payload.type === "barge_in") {
-        onBargeIn?.();
-      }
-
-      if (payload.type === "llm_response") {
-        setMessages((current) => [
-          ...current,
-          { id: crypto.randomUUID(), role: "assistant", text: payload.message },
-        ]);
-      }
-
-      if (payload.type === "llm_start") {
-        const messageId = crypto.randomUUID();
-        assistantMessageIdRef.current = messageId;
-        setMessages((current) => [
-          ...current,
-          { id: messageId, role: "assistant", text: "" },
-        ]);
-      }
-
-      if (payload.type === "llm_delta") {
-        const messageId = assistantMessageIdRef.current;
-        if (messageId) {
-          setMessages((current) =>
-            current.map((message) =>
-              message.id === messageId
-                ? { ...message, text: message.text + payload.delta }
-                : message,
-            ),
-          );
-        }
-      }
-
-      if (payload.type === "llm_done") {
-        assistantMessageIdRef.current = null;
-        onConversationUpdated?.();
-      }
-
-      if (payload.type === "llm_status") setLlmStatus(payload.status);
-
-      if (payload.type === "llm_error") {
-        setError(payload.message);
-        setLlmStatus("error");
-      }
-
-      if (payload.type === "tts_audio_start") {
-        onTtsStart?.(payload.sample_rate);
-      }
-
-      if (payload.type === "tts_status") setTtsStatus(payload.status);
-
-      if (payload.type === "tts_error") {
-        setError(payload.message);
-        setTtsStatus("error");
-      }
-
-      if (payload.type === "error") setError(payload.message);
-
-      if (payload.type === "stt_error") {
-        setError(payload.message);
-        setSttStatus("error");
-      }
-
-      if (payload.type === "stt_status") setSttStatus(payload.status);
-
-      if (payload.type === "transcript") {
-        setTurnEvent(payload.event);
-
-        if (payload.is_final) {
-          if (payload.text.trim()) {
-            setFinalTranscripts((current) => [
-              ...current,
-              { id: crypto.randomUUID(), text: payload.text.trim() },
-            ]);
+          if (payload.type === "message") {
             setMessages((current) => [
               ...current,
-              { id: crypto.randomUUID(), role: "user", text: payload.text.trim() },
+              {
+                id: crypto.randomUUID(),
+                role: "server",
+                text: payload.message,
+              },
             ]);
           }
-          setLiveTranscript("");
-        } else {
-          setLiveTranscript(payload.text);
-        }
-      }
 
-      if (payload.type === "audio_received" || payload.type === "audio_stopped") {
-        setAudioStats({ chunks: payload.chunks, bytes: payload.bytes });
-      }
-      };
+          if (payload.type === "conversation_state") {
+            setConversationStage(payload.stage);
+          }
 
-      socket.onerror = () => {
-        setError("Could not connect to the WebSocket server.");
-        settleConnection(false);
-      };
+          if (payload.type === "backend_status") {
+            setBackendStatus(payload.status);
+          }
 
-      socket.onclose = () => {
-        settleConnection(false);
-        if (socketRef.current !== socket) return;
-        socketRef.current = null;
-        setStatus("disconnected");
-        setSttStatus("disconnected");
-        setTtsStatus("disconnected");
-        setBackendStatus("idle");
-        setConversationStage("not_started");
-      };
-    });
-  }, [onAudio, onBargeIn, onConversationUpdated, onTtsStart]);
+          if (payload.type === "barge_in") {
+            onBargeIn?.();
+          }
+
+          if (payload.type === "llm_response") {
+            setMessages((current) => [
+              ...current,
+              {
+                id: crypto.randomUUID(),
+                role: "assistant",
+                text: payload.message,
+              },
+            ]);
+          }
+
+          if (payload.type === "llm_start") {
+            const messageId = crypto.randomUUID();
+            assistantMessageIdRef.current = messageId;
+            setMessages((current) => [
+              ...current,
+              { id: messageId, role: "assistant", text: "" },
+            ]);
+          }
+
+          if (payload.type === "llm_delta") {
+            const messageId = assistantMessageIdRef.current;
+            if (messageId) {
+              setMessages((current) =>
+                current.map((message) =>
+                  message.id === messageId
+                    ? { ...message, text: message.text + payload.delta }
+                    : message,
+                ),
+              );
+            }
+          }
+
+          if (payload.type === "llm_done") {
+            assistantMessageIdRef.current = null;
+            onConversationUpdated?.();
+          }
+
+          if (payload.type === "llm_status") setLlmStatus(payload.status);
+
+          if (payload.type === "llm_error") {
+            setError(payload.message);
+            setLlmStatus("error");
+          }
+
+          if (payload.type === "tts_audio_start") {
+            onTtsStart?.(payload.sample_rate);
+          }
+
+          if (payload.type === "tts_status") setTtsStatus(payload.status);
+
+          if (payload.type === "tts_error") {
+            setError(payload.message);
+            setTtsStatus("error");
+          }
+
+          if (payload.type === "error") setError(payload.message);
+
+          if (payload.type === "stt_error") {
+            setError(payload.message);
+            setSttStatus("error");
+          }
+
+          if (payload.type === "stt_status") setSttStatus(payload.status);
+
+          if (payload.type === "transcript") {
+            setTurnEvent(payload.event);
+
+            if (payload.is_final) {
+              if (payload.text.trim()) {
+                setFinalTranscripts((current) => [
+                  ...current,
+                  { id: crypto.randomUUID(), text: payload.text.trim() },
+                ]);
+                setMessages((current) => [
+                  ...current,
+                  {
+                    id: crypto.randomUUID(),
+                    role: "user",
+                    text: payload.text.trim(),
+                  },
+                ]);
+              }
+              setLiveTranscript("");
+            } else {
+              setLiveTranscript(payload.text);
+            }
+          }
+
+          if (
+            payload.type === "audio_received" ||
+            payload.type === "audio_stopped"
+          ) {
+            setAudioStats({ chunks: payload.chunks, bytes: payload.bytes });
+          }
+        };
+
+        socket.onerror = () => {
+          if (socketRef.current !== socket) return;
+          setError("Could not connect to the WebSocket server.");
+          settleConnection(false);
+        };
+
+        socket.onclose = () => {
+          settleConnection(false);
+          if (socketRef.current !== socket) return;
+          socketRef.current = null;
+          setStatus("disconnected");
+          setSttStatus("disconnected");
+          setTtsStatus("disconnected");
+          setBackendStatus("idle");
+          setConversationStage("not_started");
+        };
+      });
+    },
+    [onAudio, onBargeIn, onConversationUpdated, onTtsStart],
+  );
 
   const sendMessage = useCallback((text) => {
     const cleanText = text.trim();

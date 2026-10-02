@@ -112,6 +112,17 @@ async def list_chat_sessions(limit: int = 50) -> list[dict]:
     return await cursor.to_list(length=limit)
 
 
+async def delete_chat_session(session_id: str) -> bool:
+    session = await get_chat_session(session_id)
+    if session is None:
+        return False
+
+    database = get_database()
+    await database.chat_messages.delete_many({"session_id": session_id})
+    result = await database.chat_sessions.delete_one({"session_id": session_id})
+    return result.deleted_count == 1
+
+
 def messages_for_llm(messages: list[dict]) -> list[dict]:
     return [
         {

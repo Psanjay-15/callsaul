@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 
 from app.services.sessions import (
+    delete_chat_session,
     get_chat_session,
     list_chat_messages,
     list_chat_sessions,
@@ -32,3 +33,11 @@ async def get_session_history(session_id: str) -> dict:
         "state": session.get("state") or {},
         "messages": [message_for_client(message) for message in messages],
     }
+
+
+@router.delete("/{session_id}")
+async def delete_session_history(session_id: str) -> dict[str, bool]:
+    deleted = await delete_chat_session(session_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+    return {"deleted": True}

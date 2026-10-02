@@ -30,6 +30,7 @@ export default function App() {
   const [input, setInput] = useState("");
   const [history, setHistory] = useState([]);
   const [historyError, setHistoryError] = useState("");
+  const [deletingSessionId, setDeletingSessionId] = useState("");
   const loadHistory = useCallback(async () => {
     try {
       const response = await fetch(`${API_BASE_URL}/api/history`);
@@ -126,6 +127,38 @@ export default function App() {
     if (connected) await startMicrophone();
   }
 
+  async function deleteChat(session) {
+    const confirmed = window.confirm(
+      `Delete "${session.title}" and its conversation history?`,
+    );
+    if (!confirmed) return;
+
+    const isActiveChat = session.session_id === sessionId;
+    if (isActiveChat) {
+      clearSavedSessionReference();
+      stopCurrentChat();
+    }
+
+    setDeletingSessionId(session.session_id);
+    setHistoryError("");
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/history/${encodeURIComponent(session.session_id)}`,
+        { method: "DELETE" },
+      );
+      if (!response.ok) throw new Error("Delete request failed");
+      setHistory((current) =>
+        current.filter((item) => item.session_id !== session.session_id),
+      );
+    } catch {
+      await loadHistory();
+      setHistoryError("Could not delete this conversation.");
+    } finally {
+      setDeletingSessionId("");
+    }
+  }
+
   return (
     <main className="page-shell">
       <section className="chat-layout">
@@ -149,18 +182,32 @@ export default function App() {
 
           <nav className="history-list" aria-label="Chat history">
             {history.map((session) => (
-              <button
-                className={`history-item ${
+              <div
+                className={`history-item-row ${
                   session.session_id === sessionId ? "active" : ""
                 }`}
                 key={session.session_id}
-                type="button"
-                onClick={() => openChat(session.session_id)}
               >
-                <strong>{session.title}</strong>
-                <span>{formatActivity(session.last_message_at)}</span>
-                <small>{session.stage.replaceAll("_", " ")}</small>
-              </button>
+                <button
+                  className="history-item"
+                  type="button"
+                  onClick={() => openChat(session.session_id)}
+                >
+                  <strong>{session.title}</strong>
+                  <span>{formatActivity(session.last_message_at)}</span>
+                  <small>{session.stage.replaceAll("_", " ")}</small>
+                </button>
+                <button
+                  className="delete-history-button"
+                  type="button"
+                  aria-label={`Delete ${session.title}`}
+                  title="Delete conversation"
+                  disabled={deletingSessionId === session.session_id}
+                  onClick={() => deleteChat(session)}
+                >
+                  {deletingSessionId === session.session_id ? "Deleting…" : "Delete"}
+                </button>
+              </div>
             ))}
             {history.length === 0 && !historyError && (
               <p className="empty-history">No conversations yet.</p>
@@ -231,7 +278,7 @@ export default function App() {
                 <button
                   className={isRecording ? "stop-recording-button" : "recording-button"}
                   type="button"
-                  onClick={isRecording ? stopMicrophone : startMicrophone}
+                  onClick={isRecording ? stopCurrentChat : startMicrophone}
                   disabled={microphoneStatus === "requesting_permission"}
                 >
                   {isRecording ? "Listening · Stop" : "Start listening"}
