@@ -9,5 +9,6 @@ router = APIRouter()
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
-    service = TranscriptionService(websocket)
+    session_id = websocket.query_params.get("session_id")
+    service = TranscriptionService(websocket, session_id=session_id)
     await service.run()

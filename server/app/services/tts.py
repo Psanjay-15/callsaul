@@ -22,6 +22,8 @@ class TTSService:
         self.listener_task: asyncio.Task | None = None
         self.active_turn = False
         self.discard_audio = False
+        self.turn_finished = asyncio.Event()
+        self.turn_finished.set()
 
     async def connect(self) -> None:
         if self.connection is not None:
@@ -39,10 +41,13 @@ class TTSService:
         self.listener_task = asyncio.create_task(self.connection.start_listening())
         await self.on_event({"type": "tts_status", "status": "connected"})
 
+    def begin_turn(self) -> None:
+        self.active_turn = True
+        self.discard_audio = False
+        self.turn_finished.clear()
+
     async def send_text(self, text: str) -> None:
-        if self.connection is not None and text:
-            self.active_turn = True
-            self.discard_audio = False
+        if self.connection is not None and text and not self.discard_audio:
             await self.connection.send_speak(SpeakV2Speak(text=text))
 
     async def flush(self) -> None:
@@ -55,6 +60,7 @@ class TTSService:
 
         self.active_turn = False
         self.discard_audio = True
+        self.turn_finished.set()
         await self.connection.send_interrupt(SpeakV2Interrupt())
         await self.on_event({"type": "tts_status", "status": "interrupted"})
         return True
@@ -69,6 +75,7 @@ class TTSService:
         self.connection_context = None
         self.active_turn = False
         self.discard_audio = False
+        self.turn_finished.set()
 
         if connection is not None:
             with suppress(Exception):
@@ -94,18 +101,27 @@ class TTSService:
 
         message_type = str(getattr(message, "type", ""))
         if message_type == "SpeechStarted":
-            self.active_turn = True
-            await self.on_event({"type": "tts_status", "status": "speaking"})
+            if not self.discard_audio:
+                self.active_turn = True
+                await self.on_event({"type": "tts_status", "status": "speaking"})
         elif message_type == "SpeechMetadata":
             self.active_turn = False
-            self.discard_audio = False
-            await self.on_event({"type": "tts_status", "status": "connected"})
+            self.turn_finished.set()
+            if not self.discard_audio:
+                await self.on_event({"type": "tts_status", "status": "connected"})
         elif message_type == "SpeechInterrupted":
             self.active_turn = False
-            self.discard_audio = False
+            self.turn_finished.set()
             await self.on_event({"type": "tts_status", "status": "interrupted"})
 
+    async def wait_until_finished(self, timeout: float = 8.0) -> None:
+        try:
+            await asyncio.wait_for(self.turn_finished.wait(), timeout=timeout)
+        except TimeoutError:
+            pass
+
     async def handle_error(self, error) -> None:
+        self.turn_finished.set()
         await self.on_event(
             {
                 "type": "tts_error",

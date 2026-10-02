@@ -9,14 +9,14 @@ class LLMService:
     def __init__(self) -> None:
         self.client = create_openai_client()
 
-    async def stream_response(self, transcription: str) -> AsyncIterator[str]:
+    async def stream_response(self, history: list[dict]) -> AsyncIterator[str]:
         stream = await self.client.responses.create(
             model=settings.openai_model,
             instructions=(
                 "You are a helpful voice assistant. "
                 "Answer clearly and keep the response brief."
             ),
-            input=transcription,
+            input=history,
             stream=True,
         )
 
@@ -195,8 +195,11 @@ class LLMService:
                 f"The caller is confirming the delivery slot {selected_slot['label']}. "
                 "Call confirm_delivery_slot only for a clear yes. Call reject_delivery_slot "
                 "for a clear no without another choice. If they choose a different offered "
-                "slot, call change_delivery_slot. If the answer is unclear or is a question, "
-                "respond briefly and ask whether the selected slot will work.\n"
+                "slot in this current statement, call change_delivery_slot. Never infer a "
+                "slot from an earlier statement. If they only say they want to change, call "
+                "reject_delivery_slot so the options can be presented again. If the answer "
+                "is unclear or is a question, respond briefly and ask whether the selected "
+                "slot will work.\n"
                 f"Offered slots:\n{slot_list}"
             ),
             transcription=transcription,
@@ -246,16 +249,70 @@ class LLMService:
             ],
         )
 
+    async def understand_completed_request(
+        self,
+        transcription: str,
+        current_slot: dict | None,
+        tracking_id: str | None,
+    ) -> dict:
+        current_slot_label = (
+            current_slot.get("label", "the current time")
+            if current_slot
+            else "the current time"
+        )
+        return await self._get_tool_decision(
+            instructions=(
+                f"The caller's delivery is currently scheduled for {current_slot_label}. "
+                f"The saved tracking ID is {tracking_id or 'not available'}. "
+                "If the caller asks for their tracking ID, call provide_tracking_id. "
+                "If the caller wants to change, move, or reschedule the delivery time, "
+                "call start_delivery_reschedule. This includes requests that name a new "
+                "time, such as 'change it to 10 AM'. Do not claim that a requested time "
+                "is available yet. For questions or unrelated conversation, answer "
+                "briefly without calling the tool."
+            ),
+            transcription=transcription,
+            tools=[
+                {
+                    "type": "function",
+                    "name": "provide_tracking_id",
+                    "description": "Return the saved tracking ID to the caller.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                        "additionalProperties": False,
+                    },
+                    "strict": True,
+                },
+                {
+                    "type": "function",
+                    "name": "start_delivery_reschedule",
+                    "description": (
+                        "Start another delivery-slot selection for the current booking."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                        "additionalProperties": False,
+                    },
+                    "strict": True,
+                }
+            ],
+        )
+
     async def _get_tool_decision(
         self,
         instructions: str,
         transcription: str,
         tools: list[dict],
     ) -> dict:
+        input_messages = [{"role": "user", "content": transcription}]
         response = await self.client.responses.create(
             model=settings.openai_model,
             instructions=instructions,
-            input=transcription,
+            input=input_messages,
             tools=tools,
             tool_choice="auto",
             parallel_tool_calls=False,

@@ -18,7 +18,6 @@ export function useMicrophone({ sendAudio, sendControl }) {
   const [error, setError] = useState("");
   const recorderRef = useRef(null);
   const streamRef = useRef(null);
-
   const stop = useCallback(() => {
     const recorder = recorderRef.current;
     const stream = streamRef.current;

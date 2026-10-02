@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 
+// Keep a little audio queued so normal network jitter does not create audible
+// gaps. The delay is only added when playback starts or the queue runs empty.
+const PLAYBACK_BUFFER_SECONDS = 0.12;
+
+
 export function useAudioPlayer() {
   const [status, setStatus] = useState("idle");
   const audioContextRef = useRef(null);
@@ -47,10 +52,10 @@ export function useAudioPlayer() {
     source.buffer = audioBuffer;
     source.connect(audioContext.destination);
 
-    const startTime = Math.max(
-      audioContext.currentTime,
-      nextStartTimeRef.current,
-    );
+    const queueHasRunEmpty = nextStartTimeRef.current <= audioContext.currentTime;
+    const startTime = queueHasRunEmpty
+      ? audioContext.currentTime + PLAYBACK_BUFFER_SECONDS
+      : nextStartTimeRef.current;
     source.start(startTime);
     nextStartTimeRef.current = startTime + audioBuffer.duration;
     sourcesRef.current.add(source);

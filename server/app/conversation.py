@@ -1,4 +1,5 @@
 from dataclasses import asdict, dataclass, field
+from dataclasses import fields
 
 
 class ConversationStage:
@@ -22,3 +23,16 @@ class ConversationState:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict | None) -> "ConversationState":
+        if not data:
+            return cls()
+
+        allowed_fields = {item.name for item in fields(cls)}
+        values = {
+            key: value
+            for key, value in data.items()
+            if key in allowed_fields
+        }
+        return cls(**values)

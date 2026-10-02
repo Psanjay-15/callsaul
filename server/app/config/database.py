@@ -47,6 +47,28 @@ async def close_mongodb() -> None:
     _status = "not_configured"
 
 
+async def create_database_indexes() -> None:
+    database = get_database()
+    await database.deliveries.create_index("tracking_id", unique=True)
+    await database.delivery_slots.create_index("slot_id", unique=True)
+    await database.delivery_slots.create_index(
+        "booked_tracking_id",
+        unique=True,
+        sparse=True,
+    )
+    await database.delivery_slots.create_index(
+        "booking_idempotency_key",
+        unique=True,
+        sparse=True,
+    )
+    await database.bookings.create_index("idempotency_key", unique=True)
+    await database.chat_sessions.create_index("session_id", unique=True)
+    await database.chat_sessions.create_index("last_message_at")
+    await database.chat_messages.create_index(
+        [("session_id", 1), ("created_at", 1)]
+    )
+
+
 def mongodb_status() -> str:
     return _status
 

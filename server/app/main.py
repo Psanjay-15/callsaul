@@ -4,17 +4,21 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config.settings import settings
-from app.config.database import close_mongodb, connect_to_mongodb, mongodb_status
-from app.services.slots import seed_fake_slots
-from app.services.tracking import seed_fake_deliveries
+from app.config.database import (
+    close_mongodb,
+    connect_to_mongodb,
+    create_database_indexes,
+    mongodb_status,
+)
 from app.websocket import router as websocket_router
+from app.history import router as history_router
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await connect_to_mongodb()
-    await seed_fake_deliveries()
-    await seed_fake_slots()
+    if mongodb_status() == "connected":
+        await create_database_indexes()
     yield
     await close_mongodb()
 
@@ -34,6 +38,7 @@ app.add_middleware(
 )
 
 app.include_router(websocket_router)
+app.include_router(history_router)
 
 
 @app.get("/")

@@ -4,17 +4,25 @@ import { useCallback, useEffect, useRef, useState } from "react";
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
 
-function getWebSocketUrl() {
+function getWebSocketUrl(sessionId) {
   const url = new URL(API_BASE_URL);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.pathname = "/ws";
   url.search = "";
+  if (sessionId) url.searchParams.set("session_id", sessionId);
   return url.toString();
 }
 
 
-export function useWebSocket({ onAudio, onBargeIn, onTtsStart } = {}) {
+export function useWebSocket({
+  onAudio,
+  onBargeIn,
+  onConversationUpdated,
+  onTtsStart,
+} = {}) {
   const [status, setStatus] = useState("disconnected");
+  const [sessionId, setSessionId] = useState("");
+  const [sessionResumed, setSessionResumed] = useState(false);
   const [messages, setMessages] = useState([]);
   const [audioStats, setAudioStats] = useState({ chunks: 0, bytes: 0 });
   const [finalTranscripts, setFinalTranscripts] = useState([]);
@@ -40,10 +48,14 @@ export function useWebSocket({ onAudio, onBargeIn, onTtsStart } = {}) {
     }
 
     setStatus("disconnected");
+    setSttStatus("disconnected");
+    setTtsStatus("disconnected");
+    setBackendStatus("idle");
+    setConversationStage("not_started");
   }, []);
 
-  const connect = useCallback(() => {
-    if (socketRef.current) return;
+  const connect = useCallback((requestedSessionId = "") => {
+    if (socketRef.current) return Promise.resolve(false);
 
     setError("");
     setMessages([]);
@@ -59,13 +71,24 @@ export function useWebSocket({ onAudio, onBargeIn, onTtsStart } = {}) {
     assistantMessageIdRef.current = null;
     setStatus("connecting");
 
-    const socket = new WebSocket(getWebSocketUrl());
+    const socket = new WebSocket(getWebSocketUrl(requestedSessionId));
     socket.binaryType = "arraybuffer";
     socketRef.current = socket;
 
-    socket.onopen = () => setStatus("connected");
+    return new Promise((resolve) => {
+      let connectionSettled = false;
+      const settleConnection = (connected) => {
+        if (connectionSettled) return;
+        connectionSettled = true;
+        resolve(connected);
+      };
 
-    socket.onmessage = (event) => {
+      socket.onopen = () => {
+        setStatus("connected");
+        settleConnection(true);
+      };
+
+      socket.onmessage = (event) => {
       if (event.data instanceof ArrayBuffer) {
         onAudio?.(event.data);
         return;
@@ -73,7 +96,17 @@ export function useWebSocket({ onAudio, onBargeIn, onTtsStart } = {}) {
 
       const payload = JSON.parse(event.data);
 
-      if (payload.type === "connected" || payload.type === "message") {
+      if (payload.type === "session") {
+        setSessionId(payload.session_id);
+        setSessionResumed(payload.resumed);
+        onConversationUpdated?.();
+      }
+
+      if (payload.type === "conversation_history") {
+        setMessages(payload.messages);
+      }
+
+      if (payload.type === "message") {
         setMessages((current) => [
           ...current,
           { id: crypto.randomUUID(), role: "server", text: payload.message },
@@ -123,6 +156,7 @@ export function useWebSocket({ onAudio, onBargeIn, onTtsStart } = {}) {
 
       if (payload.type === "llm_done") {
         assistantMessageIdRef.current = null;
+        onConversationUpdated?.();
       }
 
       if (payload.type === "llm_status") setLlmStatus(payload.status);
@@ -175,19 +209,25 @@ export function useWebSocket({ onAudio, onBargeIn, onTtsStart } = {}) {
       if (payload.type === "audio_received" || payload.type === "audio_stopped") {
         setAudioStats({ chunks: payload.chunks, bytes: payload.bytes });
       }
-    };
+      };
 
-    socket.onerror = () => setError("Could not connect to the WebSocket server.");
+      socket.onerror = () => {
+        setError("Could not connect to the WebSocket server.");
+        settleConnection(false);
+      };
 
-    socket.onclose = () => {
-      socketRef.current = null;
-      setStatus("disconnected");
-      setSttStatus("disconnected");
-      setTtsStatus("disconnected");
-      setBackendStatus("idle");
-      setConversationStage("not_started");
-    };
-  }, [onAudio, onBargeIn, onTtsStart]);
+      socket.onclose = () => {
+        settleConnection(false);
+        if (socketRef.current !== socket) return;
+        socketRef.current = null;
+        setStatus("disconnected");
+        setSttStatus("disconnected");
+        setTtsStatus("disconnected");
+        setBackendStatus("idle");
+        setConversationStage("not_started");
+      };
+    });
+  }, [onAudio, onBargeIn, onConversationUpdated, onTtsStart]);
 
   const sendMessage = useCallback((text) => {
     const cleanText = text.trim();
@@ -234,6 +274,8 @@ export function useWebSocket({ onAudio, onBargeIn, onTtsStart } = {}) {
     sendAudio,
     sendControl,
     sendMessage,
+    sessionId,
+    sessionResumed,
     status,
     sttStatus,
     ttsStatus,

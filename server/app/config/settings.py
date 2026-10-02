@@ -18,11 +18,14 @@ class Settings(BaseSettings):
     mongodb_db_name: str = "callsaul"
     deepgram_api_key: str = ""
     deepgram_stt_model: str = "flux-general-en"
+    deepgram_eot_threshold: float = 0.7
+    deepgram_eot_timeout_ms: int = 2000
     deepgram_tts_model: str = "flux-alexis-en"
     deepgram_tts_sample_rate: int = 24000
     fake_backend_mode: str = "cycle"
     fake_backend_slow_seconds: float = 6.0
     fake_backend_progress_seconds: float = 2.5
+    conversation_idle_timeout_seconds: float = 60.0
     openai_api_key: str = ""
     openai_model: str = "gpt-4.1-mini-2025-04-14"
 

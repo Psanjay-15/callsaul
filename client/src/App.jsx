@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { useAudioPlayer } from "./hooks/useAudioPlayer.js";
 import { useMicrophone } from "./hooks/useMicrophone.js";
@@ -7,9 +7,40 @@ import { useWebSocket } from "./hooks/useWebSocket.js";
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
 
+function clearSavedSessionReference() {
+  localStorage.removeItem("callsaul_session_id");
+  const pageUrl = new URL(window.location.href);
+  if (!pageUrl.searchParams.has("session_id")) return;
+
+  pageUrl.searchParams.delete("session_id");
+  window.history.replaceState({}, "", pageUrl);
+}
+
+
+function formatActivity(value) {
+  if (!value) return "New chat";
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(value));
+}
+
+
 export default function App() {
-  const [apiStatus, setApiStatus] = useState("Checking backend...");
   const [input, setInput] = useState("");
+  const [history, setHistory] = useState([]);
+  const [historyError, setHistoryError] = useState("");
+  const loadHistory = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/history`);
+      if (!response.ok) throw new Error("History request failed");
+      const data = await response.json();
+      setHistory(data.sessions);
+      setHistoryError("");
+    } catch {
+      setHistoryError("Could not load chat history.");
+    }
+  }, []);
   const {
     appendAudio,
     prepare: prepareAudio,
@@ -31,6 +62,8 @@ export default function App() {
     sendAudio,
     sendControl,
     sendMessage,
+    sessionId,
+    sessionResumed,
     status,
     sttStatus,
     ttsStatus,
@@ -38,6 +71,7 @@ export default function App() {
   } = useWebSocket({
     onAudio: appendAudio,
     onBargeIn: stopAudio,
+    onConversationUpdated: loadHistory,
     onTtsStart: setSampleRate,
   });
   const {
@@ -48,165 +82,208 @@ export default function App() {
   } = useMicrophone({ sendAudio, sendControl });
 
   useEffect(() => {
-    async function checkBackend() {
-      try {
-        const response = await fetch(`${API_BASE_URL}/api/health`);
-        if (!response.ok) throw new Error("Health check failed");
-
-        const health = await response.json();
-        setApiStatus(`Backend ready · MongoDB ${health.database}`);
-      } catch {
-        setApiStatus("Backend is not running");
-      }
+    async function loadPage() {
+      clearSavedSessionReference();
+      await loadHistory();
     }
 
-    checkBackend();
-  }, []);
+    loadPage();
+  }, [loadHistory]);
+
+  const isConnected = status === "connected";
+  const isRecording = microphoneStatus === "recording";
+  const activeSession = history.find(
+    (session) => session.session_id === sessionId,
+  );
+
+  useEffect(() => {
+    if (!isConnected && isRecording) stopMicrophone();
+  }, [isConnected, isRecording, stopMicrophone]);
 
   function handleSubmit(event) {
     event.preventDefault();
     if (sendMessage(input)) setInput("");
   }
 
-  const isConnected = status === "connected";
-  const isRecording = microphoneStatus === "recording";
-
-  useEffect(() => {
-    if (!isConnected && isRecording) stopMicrophone();
-  }, [isConnected, isRecording, stopMicrophone]);
-
-  function handleDisconnect() {
+  function stopCurrentChat() {
     stopMicrophone();
     stopAudio();
     disconnect();
   }
 
-  async function handleConnect() {
+  async function openChat(targetSessionId) {
+    stopCurrentChat();
     await prepareAudio();
-    connect();
+    const connected = await connect(targetSessionId);
+    if (connected) await startMicrophone();
+  }
+
+  async function startNewChat() {
+    clearSavedSessionReference();
+    stopCurrentChat();
+    await prepareAudio();
+    const connected = await connect("");
+    if (connected) await startMicrophone();
   }
 
   return (
     <main className="page-shell">
-      <section className="agent-card">
-        <p className="eyebrow">Courier delivery assistant</p>
-        <h1>CallSaul</h1>
-        <p className="description">
-          Speak or type a message and receive a response from OpenAI.
-        </p>
-
-        <div className="status-grid">
-          <div className="status-row" role="status">
-            <span className="status-dot" aria-hidden="true" />
-            {apiStatus}
+      <section className="chat-layout">
+        <aside className="history-sidebar">
+          <div className="brand-block">
+            <p className="eyebrow">Courier assistant</p>
+            <h1>CallSaul</h1>
           </div>
-          <div className="session-details">
-            <span>WebSocket</span>
-            <strong>{status}</strong>
-          </div>
-        </div>
 
-        {!isConnected ? (
-          <button className="primary-button" type="button" onClick={handleConnect}>
-            {status === "connecting" ? "Connecting..." : "Connect WebSocket"}
+          <button className="new-chat-button" type="button" onClick={startNewChat}>
+            <span aria-hidden="true">+</span>
+            New chat
           </button>
-        ) : (
-          <>
-            <div className="audio-panel">
-              <div>
-                <span>Microphone</span>
-                <strong>{microphoneStatus.replaceAll("_", " ")}</strong>
-              </div>
-              <div className="audio-stats">
-                <span>{audioStats.chunks} chunks</span>
-                <span>{audioStats.bytes.toLocaleString()} bytes received</span>
-              </div>
-              <div className="audio-stats">
-                <span>Deepgram: {sttStatus}</span>
-                <span>Turn: {turnEvent}</span>
-              </div>
-              <div className="audio-stats">
-                <span>OpenAI: {llmStatus}</span>
-                <span>Deepgram TTS: {ttsStatus}</span>
-                <span>Playback: {playbackStatus}</span>
-              </div>
-              <div className="audio-stats">
-                <span>
-                  Conversation: {conversationStage.replaceAll("_", " ")}
-                </span>
-                <span>Backend: {backendStatus}</span>
-              </div>
+
+          <div className="history-heading">
+            <span>History</span>
+            <button type="button" onClick={loadHistory} aria-label="Refresh history">
+              Refresh
+            </button>
+          </div>
+
+          <nav className="history-list" aria-label="Chat history">
+            {history.map((session) => (
               <button
-                className={isRecording ? "stop-recording-button" : "recording-button"}
+                className={`history-item ${
+                  session.session_id === sessionId ? "active" : ""
+                }`}
+                key={session.session_id}
                 type="button"
-                onClick={isRecording ? stopMicrophone : startMicrophone}
-                disabled={microphoneStatus === "requesting_permission"}
+                onClick={() => openChat(session.session_id)}
               >
-                {isRecording ? "Stop microphone" : "Start microphone"}
+                <strong>{session.title}</strong>
+                <span>{formatActivity(session.last_message_at)}</span>
+                <small>{session.stage.replaceAll("_", " ")}</small>
               </button>
-              <p>Audio is sent to Deepgram for live transcription and is not stored.</p>
-            </div>
+            ))}
+            {history.length === 0 && !historyError && (
+              <p className="empty-history">No conversations yet.</p>
+            )}
+            {historyError && <p className="history-error">{historyError}</p>}
+          </nav>
 
-            <div className="transcript-panel" aria-live="polite">
-              <span>Live transcript</span>
-              {finalTranscripts.map((transcript) => (
-                <p className="final-transcript" key={transcript.id}>
-                  {transcript.text}
-                </p>
-              ))}
-              {liveTranscript && <p className="live-transcript">{liveTranscript}</p>}
-              {!liveTranscript && finalTranscripts.length === 0 && (
-                <p className="transcript-placeholder">
-                  Start the microphone and speak to see a transcript.
-                </p>
-              )}
-            </div>
+        </aside>
 
-            <div className="conversation" aria-live="polite">
-              {messages.map((message) => (
-                <div className={`message ${message.role}`} key={message.id}>
-                  <span>
-                    {message.role === "server"
-                      ? "Server"
-                      : message.role === "assistant"
-                        ? "Assistant"
-                        : "You"}
-                  </span>
-                  <p>{message.text}</p>
+        <section className="agent-card">
+          <header className="chat-header">
+            <div>
+              <p className="eyebrow">Delivery rescheduling</p>
+              <h2>{activeSession?.title || "Voice delivery assistant"}</h2>
+            </div>
+            <div className="connection-status">
+              <span className={`connection-dot ${status}`} aria-hidden="true" />
+              {status}
+            </div>
+          </header>
+
+          {!isConnected ? (
+            <div className="empty-chat">
+              <div className="empty-chat-icon" aria-hidden="true">CS</div>
+              <h3>Choose a conversation</h3>
+              <p>
+                Select a chat from the history or start a new delivery conversation.
+              </p>
+              <button
+                className="secondary-button compact"
+                type="button"
+                onClick={startNewChat}
+              >
+                Start new chat
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="session-strip">
+                <span>{sessionResumed ? "Resumed session" : "New session"}</span>
+                <code>{sessionId}</code>
+              </div>
+
+              <div className="conversation" aria-live="polite">
+                {messages.map((message) => (
+                  <div className={`message ${message.role}`} key={message.id}>
+                    <span>
+                      {message.role === "server"
+                        ? "Server"
+                        : message.role === "assistant"
+                          ? "Assistant"
+                          : "You"}
+                    </span>
+                    <p>{message.text}</p>
+                  </div>
+                ))}
+              </div>
+
+              <div className="live-voice-bar">
+                <div>
+                  <span>Live transcript</span>
+                  <p>
+                    {liveTranscript ||
+                      finalTranscripts.at(-1)?.text ||
+                      "Start the microphone and speak."}
+                  </p>
                 </div>
-              ))}
-            </div>
-
-            <form className="message-form" onSubmit={handleSubmit}>
-              <label htmlFor="message">Your message</label>
-              <div className="message-controls">
-                <input
-                  id="message"
-                  maxLength={300}
-                  onChange={(event) => setInput(event.target.value)}
-                  placeholder="Type a test message"
-                  value={input}
-                />
-                <button className="send-button" type="submit" disabled={!input.trim()}>
-                  Send
+                <button
+                  className={isRecording ? "stop-recording-button" : "recording-button"}
+                  type="button"
+                  onClick={isRecording ? stopMicrophone : startMicrophone}
+                  disabled={microphoneStatus === "requesting_permission"}
+                >
+                  {isRecording ? "Listening · Stop" : "Start listening"}
                 </button>
               </div>
-            </form>
 
-            <button
-              className="secondary-button"
-              type="button"
-              onClick={handleDisconnect}
-              disabled={isRecording}
-            >
-              Disconnect
-            </button>
-          </>
-        )}
+              <form className="message-form" onSubmit={handleSubmit}>
+                <div className="message-controls">
+                  <input
+                    id="message"
+                    aria-label="Your message"
+                    maxLength={300}
+                    onChange={(event) => setInput(event.target.value)}
+                    placeholder="Type a message..."
+                    value={input}
+                  />
+                  <button className="send-button" type="submit" disabled={!input.trim()}>
+                    Send
+                  </button>
+                </div>
+              </form>
 
-        {(websocketError || microphoneError) && (
-          <p className="error-message">{websocketError || microphoneError}</p>
-        )}
+              <details className="technical-status">
+                <summary>Connection details</summary>
+                <div className="technical-grid">
+                  <span>Microphone: {microphoneStatus.replaceAll("_", " ")}</span>
+                  <span>STT: {sttStatus}</span>
+                  <span>Turn: {turnEvent}</span>
+                  <span>OpenAI: {llmStatus}</span>
+                  <span>TTS: {ttsStatus}</span>
+                  <span>Playback: {playbackStatus}</span>
+                  <span>Stage: {conversationStage.replaceAll("_", " ")}</span>
+                  <span>Backend: {backendStatus}</span>
+                  <span>{audioStats.chunks} audio chunks</span>
+                </div>
+              </details>
+
+              <button
+                className="disconnect-button"
+                type="button"
+                onClick={stopCurrentChat}
+                disabled={isRecording}
+              >
+                Disconnect
+              </button>
+            </>
+          )}
+
+          {(websocketError || microphoneError) && (
+            <p className="error-message">{websocketError || microphoneError}</p>
+          )}
+        </section>
       </section>
     </main>
   );

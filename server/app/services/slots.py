@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
@@ -7,15 +7,8 @@ from app.config.database import get_database
 from app.services.fake_backend import simulate_backend_behavior
 
 
-def build_fake_slots() -> list[dict]:
-    tomorrow = date.today() + timedelta(days=1)
-    following_day = date.today() + timedelta(days=2)
-
-    return [
-        create_slot(tomorrow, "10:00", "12:00", "10 AM to 12 PM"),
-        create_slot(tomorrow, "14:00", "16:00", "2 PM to 4 PM"),
-        create_slot(following_day, "16:00", "18:00", "4 PM to 6 PM"),
-    ]
+class SlotUnavailableError(Exception):
+    pass
 
 
 def create_slot(
@@ -33,33 +26,6 @@ def create_slot(
         "label": f"{date_label}, {time_label}",
         "available": True,
     }
-
-
-async def seed_fake_slots() -> None:
-    try:
-        database = get_database()
-    except RuntimeError:
-        return
-
-    await database.delivery_slots.create_index("slot_id", unique=True)
-    await database.delivery_slots.create_index(
-        "booked_tracking_id",
-        unique=True,
-        sparse=True,
-    )
-    await database.delivery_slots.create_index(
-        "booking_idempotency_key",
-        unique=True,
-        sparse=True,
-    )
-    await database.bookings.create_index("idempotency_key", unique=True)
-
-    for slot in build_fake_slots():
-        await database.delivery_slots.update_one(
-            {"slot_id": slot["slot_id"]},
-            {"$setOnInsert": slot},
-            upsert=True,
-        )
 
 
 async def get_available_slots(limit: int = 3) -> list[dict]:
@@ -80,6 +46,14 @@ async def get_available_slots(limit: int = 3) -> list[dict]:
     return await cursor.to_list(length=limit)
 
 
+async def get_booked_slot(tracking_id: str) -> dict | None:
+    database = get_database()
+    return await database.delivery_slots.find_one(
+        {"booked_tracking_id": tracking_id},
+        {"_id": 0},
+    )
+
+
 async def book_delivery_slot(
     tracking_id: str,
     slot_id: str,
@@ -89,14 +63,60 @@ async def book_delivery_slot(
     database = get_database()
     booked_at = datetime.now(timezone.utc)
 
-    try:
+    async def save_booking(session) -> dict:
+        previous_booking = await database.bookings.find_one(
+            {"idempotency_key": idempotency_key},
+            {"_id": 0},
+            session=session,
+        )
+        if previous_booking is not None:
+            current_slot = await database.delivery_slots.find_one(
+                {"booked_tracking_id": tracking_id},
+                {"_id": 0},
+                session=session,
+            )
+            if current_slot is None:
+                raise SlotUnavailableError
+            return {"status": "already_booked", "slot": current_slot}
+
+        current_slot = await database.delivery_slots.find_one(
+            {"booked_tracking_id": tracking_id},
+            {"_id": 0},
+            session=session,
+        )
+
+        if current_slot is not None and current_slot["slot_id"] == slot_id:
+            return {"status": "already_booked", "slot": current_slot}
+
+        requested_slot = await database.delivery_slots.find_one(
+            {"slot_id": slot_id, "available": True},
+            {"_id": 0},
+            session=session,
+        )
+        if requested_slot is None:
+            raise SlotUnavailableError
+
+        if current_slot is not None:
+            await database.delivery_slots.update_one(
+                {
+                    "slot_id": current_slot["slot_id"],
+                    "booked_tracking_id": tracking_id,
+                },
+                {
+                    "$set": {"available": True},
+                    "$unset": {
+                        "booked_tracking_id": "",
+                        "booking_idempotency_key": "",
+                        "booked_at": "",
+                    },
+                },
+                session=session,
+            )
+
         slot = await database.delivery_slots.find_one_and_update(
             {
                 "slot_id": slot_id,
-                "$or": [
-                    {"available": True},
-                    {"booking_idempotency_key": idempotency_key},
-                ],
+                "available": True,
             },
             {
                 "$set": {
@@ -108,51 +128,65 @@ async def book_delivery_slot(
             },
             projection={"_id": 0},
             return_document=ReturnDocument.AFTER,
+            session=session,
         )
-    except DuplicateKeyError:
-        slot = await database.delivery_slots.find_one(
+        if slot is None:
+            raise SlotUnavailableError
+
+        await database.bookings.update_many(
             {
-                "$or": [
-                    {"booked_tracking_id": tracking_id},
-                    {"booking_idempotency_key": idempotency_key},
-                ]
+                "tracking_id": tracking_id,
+                "status": "confirmed",
             },
+            {
+                "$set": {
+                    "status": "superseded",
+                    "superseded_at": booked_at,
+                }
+            },
+            session=session,
+        )
+        await database.bookings.update_one(
+            {"idempotency_key": idempotency_key},
+            {
+                "$setOnInsert": {
+                    "idempotency_key": idempotency_key,
+                    "tracking_id": tracking_id,
+                    "slot_id": slot_id,
+                    "slot_label": slot["label"],
+                    "status": "confirmed",
+                    "created_at": booked_at,
+                }
+            },
+            upsert=True,
+            session=session,
+        )
+
+        await database.deliveries.update_one(
+            {"tracking_id": tracking_id},
+            {
+                "$set": {
+                    "status": "rescheduled",
+                    "delivery_slot_id": slot_id,
+                    "delivery_slot_label": slot["label"],
+                }
+            },
+            session=session,
+        )
+
+        status = "rescheduled" if current_slot is not None else "booked"
+        return {"status": status, "slot": slot}
+
+    try:
+        async with database.client.start_session() as session:
+            return await session.with_transaction(save_booking)
+    except SlotUnavailableError:
+        return {"status": "unavailable"}
+    except DuplicateKeyError:
+        existing_slot = await database.delivery_slots.find_one(
+            {"booked_tracking_id": tracking_id},
             {"_id": 0},
         )
-
-        if slot is None:
-            return {"status": "unavailable"}
-
-        if slot["slot_id"] != slot_id:
-            return {"status": "already_booked", "slot": slot}
-
-    if slot is None:
+        if existing_slot is not None and existing_slot["slot_id"] == slot_id:
+            return {"status": "already_booked", "slot": existing_slot}
         return {"status": "unavailable"}
-
-    await database.bookings.update_one(
-        {"idempotency_key": idempotency_key},
-        {
-            "$setOnInsert": {
-                "idempotency_key": idempotency_key,
-                "tracking_id": tracking_id,
-                "slot_id": slot_id,
-                "slot_label": slot["label"],
-                "status": "confirmed",
-                "created_at": booked_at,
-            }
-        },
-        upsert=True,
-    )
-
-    await database.deliveries.update_one(
-        {"tracking_id": tracking_id},
-        {
-            "$set": {
-                "status": "rescheduled",
-                "delivery_slot_id": slot_id,
-                "delivery_slot_label": slot["label"],
-            }
-        },
-    )
-
-    return {"status": "booked", "slot": slot}
