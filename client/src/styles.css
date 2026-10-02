@@ -18,17 +18,22 @@ body {
   min-height: 100vh;
 }
 
+button,
+input {
+  font: inherit;
+}
+
 button {
-  width: 100%;
-  margin-top: 2rem;
   border: 0;
   border-radius: 0.75rem;
   padding: 0.9rem 1.1rem;
-  color: #738078;
-  background: #dfe7e2;
-  font: inherit;
   font-weight: 700;
+  cursor: pointer;
+}
+
+button:disabled {
   cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .page-shell {
@@ -39,7 +44,7 @@ button {
 }
 
 .agent-card {
-  width: min(100%, 34rem);
+  width: min(100%, 42rem);
   padding: 2.5rem;
   border: 1px solid #d3ded7;
   border-radius: 1.5rem;
@@ -77,6 +82,28 @@ h1 {
   font-size: 0.95rem;
 }
 
+.status-grid {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.session-details {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  border-radius: 0.75rem;
+  padding: 0.75rem 0.9rem;
+  color: #526158;
+  background: #f3f7f4;
+  font-size: 0.85rem;
+  text-transform: capitalize;
+}
+
+.session-details strong {
+  color: #1e6140;
+  letter-spacing: 0.08em;
+}
+
 .status-dot {
   width: 0.65rem;
   height: 0.65rem;
@@ -85,3 +112,119 @@ h1 {
   box-shadow: 0 0 0 0.25rem #e3f5ea;
 }
 
+.primary-button {
+  width: 100%;
+  margin-top: 1.5rem;
+  color: #ffffff;
+  background: #24734a;
+}
+
+.secondary-button {
+  width: 100%;
+  margin-top: 0.75rem;
+  color: #526158;
+  background: #e9efeb;
+}
+
+.conversation {
+  height: 20rem;
+  margin-top: 1.5rem;
+  overflow-y: auto;
+  border: 1px solid #dbe5de;
+  border-radius: 1rem;
+  padding: 1rem;
+  background: #f8faf9;
+}
+
+.message {
+  width: fit-content;
+  max-width: 85%;
+  margin-bottom: 1rem;
+}
+
+.message span {
+  display: block;
+  margin-bottom: 0.25rem;
+  color: #758279;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.message p {
+  margin: 0;
+  border-radius: 0.9rem;
+  padding: 0.75rem 0.9rem;
+  line-height: 1.45;
+}
+
+.message.server p {
+  color: #263d30;
+  background: #e8f3ec;
+}
+
+.message.user {
+  margin-left: auto;
+}
+
+.message.user span {
+  text-align: right;
+}
+
+.message.user p {
+  color: #ffffff;
+  background: #24734a;
+}
+
+.message-form {
+  margin-top: 1rem;
+}
+
+.message-form label {
+  display: block;
+  margin-bottom: 0.4rem;
+  color: #526158;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.message-controls {
+  display: flex;
+  gap: 0.6rem;
+}
+
+.message-controls input {
+  min-width: 0;
+  flex: 1;
+  border: 1px solid #cbd8cf;
+  border-radius: 0.75rem;
+  padding: 0.8rem 0.9rem;
+  color: #14221b;
+  background: #ffffff;
+}
+
+.message-controls input:focus {
+  outline: 3px solid #d5ebde;
+  border-color: #24734a;
+}
+
+.send-button {
+  color: #ffffff;
+  background: #24734a;
+}
+
+.error-message {
+  margin: 1rem 0 0;
+  color: #a63737;
+  font-size: 0.9rem;
+}
+
+@media (max-width: 560px) {
+  .agent-card {
+    padding: 1.5rem;
+  }
+
+  .message-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}

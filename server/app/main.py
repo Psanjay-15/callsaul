@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.database import close_mongodb, connect_to_mongodb, mongodb_status
+from app.websocket import router as websocket_router
 
 
 @asynccontextmanager
@@ -28,6 +29,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(websocket_router)
+
 
 @app.get("/")
 async def root() -> dict[str, str]:
@@ -41,4 +44,3 @@ async def health() -> dict[str, str]:
         "environment": settings.app_env,
         "database": mongodb_status(),
     }
-
