@@ -3,7 +3,7 @@ import logging
 from pymongo import AsyncMongoClient
 from pymongo.errors import PyMongoError
 
-from app.config import settings
+from app.config.settings import settings
 
 
 logger = logging.getLogger(__name__)

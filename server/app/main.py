@@ -3,8 +3,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.config import settings
-from app.database import close_mongodb, connect_to_mongodb, mongodb_status
+from app.config.settings import settings
+from app.config.database import close_mongodb, connect_to_mongodb, mongodb_status
 from app.websocket import router as websocket_router
 
 

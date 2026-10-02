@@ -1,2 +1,0 @@
-"""CallSaul backend application."""
-
