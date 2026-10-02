@@ -3,7 +3,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 
 from deepgram.core.events import EventType
-from deepgram.speak.v2.types import SpeakV2Speak
+from deepgram.speak.v2.types import SpeakV2Interrupt, SpeakV2Speak
 
 from app.clients.deepgram import create_deepgram_client
 from app.config.settings import settings
@@ -20,6 +20,8 @@ class TTSService:
         self.connection_context = None
         self.connection = None
         self.listener_task: asyncio.Task | None = None
+        self.active_turn = False
+        self.discard_audio = False
 
     async def connect(self) -> None:
         if self.connection is not None:
@@ -39,11 +41,23 @@ class TTSService:
 
     async def send_text(self, text: str) -> None:
         if self.connection is not None and text:
+            self.active_turn = True
+            self.discard_audio = False
             await self.connection.send_speak(SpeakV2Speak(text=text))
 
     async def flush(self) -> None:
         if self.connection is not None:
             await self.connection.send_flush()
+
+    async def interrupt(self) -> bool:
+        if self.connection is None or not self.active_turn:
+            return False
+
+        self.active_turn = False
+        self.discard_audio = True
+        await self.connection.send_interrupt(SpeakV2Interrupt())
+        await self.on_event({"type": "tts_status", "status": "interrupted"})
+        return True
 
     async def close(self) -> None:
         connection = self.connection
@@ -53,6 +67,8 @@ class TTSService:
         self.connection = None
         self.listener_task = None
         self.connection_context = None
+        self.active_turn = False
+        self.discard_audio = False
 
         if connection is not None:
             with suppress(Exception):
@@ -72,14 +88,22 @@ class TTSService:
 
     async def handle_message(self, message) -> None:
         if isinstance(message, bytes):
-            await self.on_audio(message)
+            if not self.discard_audio:
+                await self.on_audio(message)
             return
 
         message_type = str(getattr(message, "type", ""))
         if message_type == "SpeechStarted":
+            self.active_turn = True
             await self.on_event({"type": "tts_status", "status": "speaking"})
         elif message_type == "SpeechMetadata":
+            self.active_turn = False
+            self.discard_audio = False
             await self.on_event({"type": "tts_status", "status": "connected"})
+        elif message_type == "SpeechInterrupted":
+            self.active_turn = False
+            self.discard_audio = False
+            await self.on_event({"type": "tts_status", "status": "interrupted"})
 
     async def handle_error(self, error) -> None:
         await self.on_event(

@@ -13,7 +13,7 @@ function getWebSocketUrl() {
 }
 
 
-export function useWebSocket({ onAudio, onTtsStart } = {}) {
+export function useWebSocket({ onAudio, onBargeIn, onTtsStart } = {}) {
   const [status, setStatus] = useState("disconnected");
   const [messages, setMessages] = useState([]);
   const [audioStats, setAudioStats] = useState({ chunks: 0, bytes: 0 });
@@ -86,6 +86,10 @@ export function useWebSocket({ onAudio, onTtsStart } = {}) {
 
       if (payload.type === "backend_status") {
         setBackendStatus(payload.status);
+      }
+
+      if (payload.type === "barge_in") {
+        onBargeIn?.();
       }
 
       if (payload.type === "llm_response") {
@@ -183,7 +187,7 @@ export function useWebSocket({ onAudio, onTtsStart } = {}) {
       setBackendStatus("idle");
       setConversationStage("not_started");
     };
-  }, [onAudio, onTtsStart]);
+  }, [onAudio, onBargeIn, onTtsStart]);
 
   const sendMessage = useCallback((text) => {
     const cleanText = text.trim();

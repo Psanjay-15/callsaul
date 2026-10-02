@@ -35,7 +35,11 @@ export default function App() {
     sttStatus,
     ttsStatus,
     turnEvent,
-  } = useWebSocket({ onAudio: appendAudio, onTtsStart: setSampleRate });
+  } = useWebSocket({
+    onAudio: appendAudio,
+    onBargeIn: stopAudio,
+    onTtsStart: setSampleRate,
+  });
   const {
     error: microphoneError,
     start: startMicrophone,

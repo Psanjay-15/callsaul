@@ -25,6 +25,8 @@ class TranscriptionService:
         self.websocket = websocket
         self.send_lock = asyncio.Lock()
         self.conversation_lock = asyncio.Lock()
+        self.user_tasks: set[asyncio.Task] = set()
+        self.response_generation = 0
         self.state = ConversationState()
         self.llm = LLMService()
         self.tts = TTSService(self.send_audio, self.send)
@@ -65,6 +67,10 @@ class TranscriptionService:
         except WebSocketDisconnect:
             pass
         finally:
+            for task in self.user_tasks:
+                task.cancel()
+            if self.user_tasks:
+                await asyncio.gather(*self.user_tasks, return_exceptions=True)
             await self.close_deepgram_stream()
             await self.tts.close()
 
@@ -166,6 +172,10 @@ class TranscriptionService:
             return
 
         turn_event = str(message.event)
+
+        if turn_event == "StartOfTurn":
+            await self.handle_barge_in()
+
         await self.send(
             {
                 "type": "transcript",
@@ -177,7 +187,23 @@ class TranscriptionService:
         )
 
         if turn_event == "EndOfTurn" and message.transcript.strip():
-            await self.handle_user_input(message.transcript)
+            task = asyncio.create_task(self.handle_user_input(message.transcript))
+            self.user_tasks.add(task)
+            task.add_done_callback(self.user_tasks.discard)
+
+    async def handle_barge_in(self) -> None:
+        self.response_generation += 1
+        await self.send({"type": "barge_in"})
+
+        try:
+            await self.tts.interrupt()
+        except Exception as error:
+            await self.send(
+                {
+                    "type": "tts_error",
+                    "message": f"Could not interrupt Deepgram speech: {error}",
+                }
+            )
 
     async def handle_deepgram_error(self, error) -> None:
         await self.send(
@@ -230,6 +256,8 @@ class TranscriptionService:
 
         await self.send({"type": "llm_status", "status": "streaming"})
         await self.send({"type": "llm_start"})
+        self.response_generation += 1
+        response_generation = self.response_generation
 
         tts_ready = False
         try:
@@ -250,8 +278,13 @@ class TranscriptionService:
             )
 
         full_response = ""
+        interrupted = False
         try:
             async for delta in self.llm.stream_response(text.strip()):
+                if response_generation != self.response_generation:
+                    interrupted = True
+                    break
+
                 full_response += delta
                 await self.send({"type": "llm_delta", "delta": delta})
 
@@ -266,6 +299,12 @@ class TranscriptionService:
                                 "message": f"Could not stream text to Deepgram TTS: {error}",
                             }
                         )
+
+            if interrupted:
+                await self.send(
+                    {"type": "llm_done", "message": full_response.strip()}
+                )
+                return
 
             if tts_ready:
                 try:
