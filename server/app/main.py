@@ -5,12 +5,14 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config.settings import settings
 from app.config.database import close_mongodb, connect_to_mongodb, mongodb_status
+from app.services.tracking import seed_fake_deliveries
 from app.websocket import router as websocket_router
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await connect_to_mongodb()
+    await seed_fake_deliveries()
     yield
     await close_mongodb()
 

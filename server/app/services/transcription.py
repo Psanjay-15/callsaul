@@ -7,8 +7,14 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from app.clients.deepgram import create_deepgram_client
 from app.config.settings import settings
-from app.conversation import ConversationState
+from app.conversation import ConversationStage, ConversationState
 from app.services.llm import LLMService
+from app.services.tracking import (
+    find_delivery,
+    is_valid_tracking_id,
+    normalize_tracking_id,
+    tracking_id_for_speech,
+)
 from app.services.tts import TTSService
 
 
@@ -16,6 +22,7 @@ class TranscriptionService:
     def __init__(self, websocket: WebSocket) -> None:
         self.websocket = websocket
         self.send_lock = asyncio.Lock()
+        self.conversation_lock = asyncio.Lock()
         self.state = ConversationState()
         self.llm = LLMService()
         self.tts = TTSService(self.send_audio, self.send)
@@ -34,6 +41,10 @@ class TranscriptionService:
             }
         )
         await self.send_conversation_state()
+        await self.send_assistant_message(
+            "Hello. I can help reschedule your delivery. "
+            "Please say your tracking ID. It has two letters followed by six digits."
+        )
 
         try:
             while True:
@@ -73,7 +84,7 @@ class TranscriptionService:
         elif message_type == "ping":
             await self.send({"type": "pong"})
         elif message_type == "message":
-            await self.send_to_llm(message.get("text"))
+            await self.handle_user_input(message.get("text"))
         elif message_type == "stop":
             await self.websocket.close(code=1000)
             return True
@@ -164,7 +175,7 @@ class TranscriptionService:
         )
 
         if turn_event == "EndOfTurn" and message.transcript.strip():
-            await self.send_to_llm(message.transcript)
+            await self.handle_user_input(message.transcript)
 
     async def handle_deepgram_error(self, error) -> None:
         await self.send(
@@ -277,6 +288,161 @@ class TranscriptionService:
             )
         finally:
             await self.send({"type": "llm_status", "status": "idle"})
+
+    async def handle_user_input(self, text) -> None:
+        if not isinstance(text, str) or not text.strip():
+            await self.send({"type": "error", "message": "Message cannot be empty."})
+            return
+
+        async with self.conversation_lock:
+            if self.state.stage == ConversationStage.COLLECTING_TRACKING_ID:
+                await self.collect_tracking_id(text.strip())
+            elif self.state.stage == ConversationStage.CONFIRMING_TRACKING_ID:
+                await self.confirm_tracking_id(text.strip())
+            else:
+                await self.send_to_llm(text.strip())
+
+    async def collect_tracking_id(self, text: str) -> None:
+        await self.send({"type": "llm_status", "status": "thinking"})
+        try:
+            decision = await self.llm.understand_tracking_id(
+                text,
+                self.state.tracking_id,
+            )
+        except Exception as error:
+            await self.send(
+                {
+                    "type": "llm_error",
+                    "message": f"Could not understand the tracking ID: {error}",
+                }
+            )
+            return
+        finally:
+            await self.send({"type": "llm_status", "status": "idle"})
+
+        if decision["tool"] != "capture_tracking_id":
+            message = decision["message"] or (
+                "Please say your tracking ID. It has two letters followed by six digits."
+            )
+            await self.send_assistant_message(message)
+            return
+
+        await self.check_tracking_id(decision["arguments"].get("tracking_id", ""))
+
+    async def confirm_tracking_id(self, text: str) -> None:
+        await self.send({"type": "llm_status", "status": "thinking"})
+        try:
+            decision = await self.llm.understand_tracking_confirmation(
+                text,
+                self.state.tracking_id,
+            )
+        except Exception as error:
+            await self.send(
+                {
+                    "type": "llm_error",
+                    "message": f"Could not understand the confirmation: {error}",
+                }
+            )
+            return
+        finally:
+            await self.send({"type": "llm_status", "status": "idle"})
+
+        if decision["tool"] == "confirm_tracking_id":
+            self.state.tracking_id_confirmed = True
+            self.state.stage = ConversationStage.OFFERING_SLOTS
+            await self.send_conversation_state()
+            await self.send_assistant_message(
+                "Thank you. Your tracking ID is confirmed. "
+                "Next, I will check the available delivery slots."
+            )
+            return
+
+        if decision["tool"] == "replace_tracking_id":
+            await self.check_tracking_id(
+                decision["arguments"].get("tracking_id", "")
+            )
+            return
+
+        if decision["tool"] == "reject_tracking_id":
+            self.state.tracking_id = None
+            self.state.tracking_id_confirmed = False
+            self.state.stage = ConversationStage.COLLECTING_TRACKING_ID
+            await self.send_conversation_state()
+            await self.send_assistant_message(
+                "No problem. Please say the complete tracking ID again."
+            )
+            return
+
+        message = decision["message"] or (
+            "Please say yes if the tracking ID is correct, "
+            "or tell me what needs to be changed."
+        )
+        await self.send_assistant_message(message)
+
+    async def check_tracking_id(self, candidate: str) -> None:
+        tracking_id = normalize_tracking_id(candidate)
+
+        if not is_valid_tracking_id(tracking_id):
+            self.state.tracking_id = tracking_id or None
+            self.state.tracking_id_confirmed = False
+            self.state.stage = ConversationStage.COLLECTING_TRACKING_ID
+            await self.send_conversation_state()
+            await self.send_assistant_message(
+                f"I heard {tracking_id or 'an incomplete tracking ID'}, but tracking IDs "
+                "must have two letters followed by six digits. Please say it again."
+            )
+            return
+
+        try:
+            delivery = await find_delivery(tracking_id)
+        except Exception:
+            await self.send_assistant_message(
+                "I cannot access the delivery system right now. Please try again."
+            )
+            return
+
+        if delivery is None:
+            self.state.tracking_id = tracking_id
+            self.state.tracking_id_confirmed = False
+            self.state.stage = ConversationStage.COLLECTING_TRACKING_ID
+            await self.send_conversation_state()
+            await self.send_assistant_message(
+                f"I could not find tracking ID {tracking_id_for_speech(tracking_id)}. "
+                "Please check it and say it again."
+            )
+            return
+
+        self.state.tracking_id = tracking_id
+        self.state.tracking_id_confirmed = False
+        self.state.stage = ConversationStage.CONFIRMING_TRACKING_ID
+        await self.send_conversation_state()
+        await self.send_assistant_message(
+            f"I found tracking ID {tracking_id_for_speech(tracking_id)}. "
+            "Is that correct?"
+        )
+
+    async def send_assistant_message(self, message: str) -> None:
+        await self.send({"type": "llm_start"})
+        await self.send({"type": "llm_delta", "delta": message})
+        await self.send({"type": "llm_done", "message": message})
+
+        try:
+            await self.tts.connect()
+            await self.send(
+                {
+                    "type": "tts_audio_start",
+                    "sample_rate": settings.deepgram_tts_sample_rate,
+                }
+            )
+            await self.tts.send_text(message)
+            await self.tts.flush()
+        except Exception as error:
+            await self.send(
+                {
+                    "type": "tts_error",
+                    "message": f"Could not generate speech: {error}",
+                }
+            )
 
     async def send(self, payload: dict) -> None:
         async with self.send_lock:
