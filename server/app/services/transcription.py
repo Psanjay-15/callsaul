@@ -6,6 +6,7 @@ from deepgram.core.events import EventType
 from fastapi import WebSocket, WebSocketDisconnect
 
 from app.config.settings import settings
+from app.services.llm import LLMService
 from app.stt.deepgram_client import create_deepgram_client
 
 
@@ -13,6 +14,7 @@ class TranscriptionService:
     def __init__(self, websocket: WebSocket) -> None:
         self.websocket = websocket
         self.send_lock = asyncio.Lock()
+        self.llm = LLMService()
         self.connection_context = None
         self.connection = None
         self.listener_task: asyncio.Task | None = None
@@ -65,7 +67,7 @@ class TranscriptionService:
         elif message_type == "ping":
             await self.send({"type": "pong"})
         elif message_type == "message":
-            await self.echo_message(message.get("text"))
+            await self.send_to_llm(message.get("text"))
         elif message_type == "stop":
             await self.websocket.close(code=1000)
             return True
@@ -155,6 +157,9 @@ class TranscriptionService:
             }
         )
 
+        if turn_event == "EndOfTurn" and message.transcript.strip():
+            await self.send_to_llm(message.transcript)
+
     async def handle_deepgram_error(self, error) -> None:
         await self.send(
             {
@@ -199,14 +204,24 @@ class TranscriptionService:
             with suppress(Exception):
                 await connection_context.__aexit__(None, None, None)
 
-    async def echo_message(self, text) -> None:
+    async def send_to_llm(self, text) -> None:
         if not isinstance(text, str) or not text.strip():
             await self.send({"type": "error", "message": "Message cannot be empty."})
             return
 
-        await self.send(
-            {"type": "message", "message": f"Server received: {text.strip()}"}
-        )
+        await self.send({"type": "llm_status", "status": "thinking"})
+        try:
+            response = await self.llm.get_response(text.strip())
+            await self.send({"type": "llm_response", "message": response})
+        except Exception as error:
+            await self.send(
+                {
+                    "type": "llm_error",
+                    "message": f"Could not get an OpenAI response: {error}",
+                }
+            )
+        finally:
+            await self.send({"type": "llm_status", "status": "idle"})
 
     async def send(self, payload: dict) -> None:
         async with self.send_lock:

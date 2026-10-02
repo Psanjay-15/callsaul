@@ -233,7 +233,8 @@ h1 {
   line-height: 1.45;
 }
 
-.message.server p {
+.message.server p,
+.message.assistant p {
   color: #263d30;
   background: #e8f3ec;
 }

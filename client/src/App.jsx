@@ -16,6 +16,7 @@ export default function App() {
     error: websocketError,
     finalTranscripts,
     liveTranscript,
+    llmStatus,
     messages,
     sendAudio,
     sendControl,
@@ -70,7 +71,7 @@ export default function App() {
         <p className="eyebrow">Courier delivery assistant</p>
         <h1>CallSaul</h1>
         <p className="description">
-          Verify browser microphone audio streaming before adding speech recognition.
+          Speak or type a message and receive a response from OpenAI.
         </p>
 
         <div className="status-grid">
@@ -103,6 +104,9 @@ export default function App() {
                 <span>Deepgram: {sttStatus}</span>
                 <span>Turn: {turnEvent}</span>
               </div>
+              <div className="audio-stats">
+                <span>OpenAI: {llmStatus}</span>
+              </div>
               <button
                 className={isRecording ? "stop-recording-button" : "recording-button"}
                 type="button"
@@ -132,7 +136,13 @@ export default function App() {
             <div className="conversation" aria-live="polite">
               {messages.map((message) => (
                 <div className={`message ${message.role}`} key={message.id}>
-                  <span>{message.role === "server" ? "Server" : "You"}</span>
+                  <span>
+                    {message.role === "server"
+                      ? "Server"
+                      : message.role === "assistant"
+                        ? "Assistant"
+                        : "You"}
+                  </span>
                   <p>{message.text}</p>
                 </div>
               ))}

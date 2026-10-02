@@ -20,6 +20,7 @@ export function useWebSocket() {
   const [finalTranscripts, setFinalTranscripts] = useState([]);
   const [liveTranscript, setLiveTranscript] = useState("");
   const [sttStatus, setSttStatus] = useState("disconnected");
+  const [llmStatus, setLlmStatus] = useState("idle");
   const [turnEvent, setTurnEvent] = useState("idle");
   const [error, setError] = useState("");
   const socketRef = useRef(null);
@@ -46,6 +47,7 @@ export function useWebSocket() {
     setFinalTranscripts([]);
     setLiveTranscript("");
     setSttStatus("disconnected");
+    setLlmStatus("idle");
     setTurnEvent("idle");
     setStatus("connecting");
 
@@ -62,6 +64,20 @@ export function useWebSocket() {
           ...current,
           { id: crypto.randomUUID(), role: "server", text: payload.message },
         ]);
+      }
+
+      if (payload.type === "llm_response") {
+        setMessages((current) => [
+          ...current,
+          { id: crypto.randomUUID(), role: "assistant", text: payload.message },
+        ]);
+      }
+
+      if (payload.type === "llm_status") setLlmStatus(payload.status);
+
+      if (payload.type === "llm_error") {
+        setError(payload.message);
+        setLlmStatus("error");
       }
 
       if (payload.type === "error") setError(payload.message);
@@ -81,6 +97,10 @@ export function useWebSocket() {
             setFinalTranscripts((current) => [
               ...current,
               { id: crypto.randomUUID(), text: payload.text.trim() },
+            ]);
+            setMessages((current) => [
+              ...current,
+              { id: crypto.randomUUID(), role: "user", text: payload.text.trim() },
             ]);
           }
           setLiveTranscript("");
@@ -141,6 +161,7 @@ export function useWebSocket() {
     error,
     finalTranscripts,
     liveTranscript,
+    llmStatus,
     messages,
     sendAudio,
     sendControl,

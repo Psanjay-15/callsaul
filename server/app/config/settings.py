@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     mongodb_db_name: str = "callsaul"
     deepgram_api_key: str = ""
     deepgram_stt_model: str = "flux-general-en"
+    openai_api_key: str = ""
+    openai_model: str = "gpt-4.1-mini-2025-04-14"
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",
