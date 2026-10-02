@@ -1,6 +1,10 @@
+import asyncio
 import json
+from contextlib import suppress
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
+from app.providers.deepgram_stt import DeepgramFluxSTT
 
 
 router = APIRouter()
@@ -9,11 +13,17 @@ router = APIRouter()
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
+    send_lock = asyncio.Lock()
     audio_active = False
     audio_chunks = 0
     audio_bytes = 0
+    stt: DeepgramFluxSTT | None = None
 
-    await websocket.send_json(
+    async def send(payload: dict) -> None:
+        async with send_lock:
+            await websocket.send_json(payload)
+
+    await send(
         {
             "type": "connected",
             "message": "WebSocket connection established.",
@@ -29,7 +39,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             audio = event.get("bytes")
             if audio is not None:
                 if not audio_active:
-                    await websocket.send_json(
+                    await send(
                         {
                             "type": "error",
                             "message": "Start the microphone before sending audio.",
@@ -39,8 +49,21 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
                 audio_chunks += 1
                 audio_bytes += len(audio)
+                if stt is not None:
+                    try:
+                        await stt.send_audio(audio)
+                    except Exception as error:
+                        await send(
+                            {
+                                "type": "stt_error",
+                                "message": f"Could not send audio to Deepgram: {error}",
+                            }
+                        )
+                        await stt.close()
+                        stt = None
+
                 if audio_chunks == 1 or audio_chunks % 10 == 0:
-                    await websocket.send_json(
+                    await send(
                         {
                             "type": "audio_received",
                             "chunks": audio_chunks,
@@ -56,7 +79,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             try:
                 message = json.loads(raw_message)
             except json.JSONDecodeError:
-                await websocket.send_json(
+                await send(
                     {"type": "error", "message": "WebSocket message must be valid JSON."}
                 )
                 continue
@@ -64,13 +87,13 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             message_type = message.get("type")
 
             if message_type == "ping":
-                await websocket.send_json({"type": "pong"})
+                await send({"type": "pong"})
                 continue
 
             if message_type == "message":
                 text = message.get("text")
                 if not isinstance(text, str) or not text.strip() or len(text.strip()) > 300:
-                    await websocket.send_json(
+                    await send(
                         {
                             "type": "error",
                             "message": "Messages must contain between 1 and 300 characters.",
@@ -78,7 +101,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     )
                     continue
 
-                await websocket.send_json(
+                await send(
                     {
                         "type": "message",
                         "message": f"Server received: {text.strip()}",
@@ -90,7 +113,24 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 audio_active = True
                 audio_chunks = 0
                 audio_bytes = 0
-                await websocket.send_json(
+
+                if stt is not None:
+                    await stt.close()
+
+                stt = DeepgramFluxSTT(send)
+                try:
+                    await stt.start()
+                except Exception as error:
+                    await send(
+                        {
+                            "type": "stt_error",
+                            "message": f"Could not connect to Deepgram: {error}",
+                        }
+                    )
+                    await stt.close()
+                    stt = None
+
+                await send(
                     {
                         "type": "audio_started",
                         "mime_type": message.get("mime_type", "unknown"),
@@ -100,7 +140,11 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
             if message_type == "audio_stop":
                 audio_active = False
-                await websocket.send_json(
+                if stt is not None:
+                    await stt.close()
+                    stt = None
+
+                await send(
                     {
                         "type": "audio_stopped",
                         "chunks": audio_chunks,
@@ -110,11 +154,18 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 continue
 
             if message_type == "stop":
+                if stt is not None:
+                    await stt.close()
+                    stt = None
                 await websocket.close(code=1000)
                 return
 
-            await websocket.send_json(
+            await send(
                 {"type": "error", "message": "Unsupported WebSocket message type."}
             )
     except WebSocketDisconnect:
         return
+    finally:
+        if stt is not None:
+            with suppress(Exception):
+                await stt.close()

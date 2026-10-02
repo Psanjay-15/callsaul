@@ -158,6 +158,40 @@ h1 {
   margin: 0;
 }
 
+.transcript-panel {
+  min-height: 8rem;
+  margin-top: 1rem;
+  border: 1px solid #dbe5de;
+  border-radius: 1rem;
+  padding: 1rem;
+  background: #ffffff;
+}
+
+.transcript-panel > span {
+  color: #68776e;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.final-transcript,
+.live-transcript,
+.transcript-placeholder {
+  margin: 0.75rem 0 0;
+  line-height: 1.5;
+}
+
+.final-transcript {
+  color: #20382a;
+}
+
+.live-transcript,
+.transcript-placeholder {
+  color: #718077;
+  font-style: italic;
+}
+
 .recording-button {
   color: #ffffff;
   background: #24734a;

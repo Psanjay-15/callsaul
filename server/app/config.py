@@ -16,6 +16,8 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("MONGODB_URI"),
     )
     mongodb_db_name: str = "callsaul"
+    deepgram_api_key: str = ""
+    deepgram_stt_model: str = "flux-general-en"
 
     model_config = SettingsConfigDict(
         env_file=ROOT_DIR / ".env",

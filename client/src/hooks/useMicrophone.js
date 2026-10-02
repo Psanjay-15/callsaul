@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 
-const AUDIO_CHUNK_MS = 100;
+const AUDIO_CHUNK_MS = 80;
 const MIME_TYPES = [
   "audio/webm;codecs=opus",
   "audio/webm",
-  "audio/mp4",
 ];
 
 
@@ -50,9 +49,13 @@ export function useMicrophone({ sendAudio, sendControl }) {
         },
       });
       const mimeType = supportedMimeType();
+      if (!mimeType) {
+        stream.getTracks().forEach((track) => track.stop());
+        throw new Error("This browser cannot record WebM/Opus audio. Please use Chrome.");
+      }
       const recorder = new MediaRecorder(
         stream,
-        mimeType ? { mimeType } : undefined,
+        { mimeType },
       );
 
       streamRef.current = stream;

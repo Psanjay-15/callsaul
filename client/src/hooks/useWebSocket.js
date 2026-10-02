@@ -17,6 +17,10 @@ export function useWebSocket() {
   const [status, setStatus] = useState("disconnected");
   const [messages, setMessages] = useState([]);
   const [audioStats, setAudioStats] = useState({ chunks: 0, bytes: 0 });
+  const [finalTranscripts, setFinalTranscripts] = useState([]);
+  const [liveTranscript, setLiveTranscript] = useState("");
+  const [sttStatus, setSttStatus] = useState("disconnected");
+  const [turnEvent, setTurnEvent] = useState("idle");
   const [error, setError] = useState("");
   const socketRef = useRef(null);
 
@@ -39,6 +43,10 @@ export function useWebSocket() {
     setError("");
     setMessages([]);
     setAudioStats({ chunks: 0, bytes: 0 });
+    setFinalTranscripts([]);
+    setLiveTranscript("");
+    setSttStatus("disconnected");
+    setTurnEvent("idle");
     setStatus("connecting");
 
     const socket = new WebSocket(getWebSocketUrl());
@@ -58,6 +66,29 @@ export function useWebSocket() {
 
       if (payload.type === "error") setError(payload.message);
 
+      if (payload.type === "stt_error") {
+        setError(payload.message);
+        setSttStatus("error");
+      }
+
+      if (payload.type === "stt_status") setSttStatus(payload.status);
+
+      if (payload.type === "transcript") {
+        setTurnEvent(payload.event);
+
+        if (payload.is_final) {
+          if (payload.text.trim()) {
+            setFinalTranscripts((current) => [
+              ...current,
+              { id: crypto.randomUUID(), text: payload.text.trim() },
+            ]);
+          }
+          setLiveTranscript("");
+        } else {
+          setLiveTranscript(payload.text);
+        }
+      }
+
       if (payload.type === "audio_received" || payload.type === "audio_stopped") {
         setAudioStats({ chunks: payload.chunks, bytes: payload.bytes });
       }
@@ -68,6 +99,7 @@ export function useWebSocket() {
     socket.onclose = () => {
       socketRef.current = null;
       setStatus("disconnected");
+      setSttStatus("disconnected");
     };
   }, []);
 
@@ -107,10 +139,14 @@ export function useWebSocket() {
     connect,
     disconnect,
     error,
+    finalTranscripts,
+    liveTranscript,
     messages,
     sendAudio,
     sendControl,
     sendMessage,
     status,
+    sttStatus,
+    turnEvent,
   };
 }

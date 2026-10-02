@@ -14,11 +14,15 @@ export default function App() {
     connect,
     disconnect,
     error: websocketError,
+    finalTranscripts,
+    liveTranscript,
     messages,
     sendAudio,
     sendControl,
     sendMessage,
     status,
+    sttStatus,
+    turnEvent,
   } = useWebSocket();
   const {
     error: microphoneError,
@@ -95,6 +99,10 @@ export default function App() {
                 <span>{audioStats.chunks} chunks</span>
                 <span>{audioStats.bytes.toLocaleString()} bytes received</span>
               </div>
+              <div className="audio-stats">
+                <span>Deepgram: {sttStatus}</span>
+                <span>Turn: {turnEvent}</span>
+              </div>
               <button
                 className={isRecording ? "stop-recording-button" : "recording-button"}
                 type="button"
@@ -103,7 +111,22 @@ export default function App() {
               >
                 {isRecording ? "Stop microphone" : "Start microphone"}
               </button>
-              <p>Audio is sent to FastAPI but is not transcribed or stored.</p>
+              <p>Audio is sent to Deepgram for live transcription and is not stored.</p>
+            </div>
+
+            <div className="transcript-panel" aria-live="polite">
+              <span>Live transcript</span>
+              {finalTranscripts.map((transcript) => (
+                <p className="final-transcript" key={transcript.id}>
+                  {transcript.text}
+                </p>
+              ))}
+              {liveTranscript && <p className="live-transcript">{liveTranscript}</p>}
+              {!liveTranscript && finalTranscripts.length === 0 && (
+                <p className="transcript-placeholder">
+                  Start the microphone and speak to see a transcript.
+                </p>
+              )}
             </div>
 
             <div className="conversation" aria-live="polite">
