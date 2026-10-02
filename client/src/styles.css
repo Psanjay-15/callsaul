@@ -98,6 +98,52 @@ h1 {
   line-height: 1;
 }
 
+.demo-guide {
+  margin-top: 0.8rem;
+  border: 1px solid #d4e2d9;
+  border-radius: 0.8rem;
+  padding: 0.75rem;
+  color: #536158;
+  background: #ffffff;
+}
+
+.demo-guide strong,
+.demo-guide code,
+.demo-guide small {
+  display: block;
+}
+
+.demo-guide strong {
+  color: #24734a;
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.demo-guide p {
+  margin: 0.4rem 0;
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+.demo-guide code {
+  width: fit-content;
+  border-radius: 0.35rem;
+  padding: 0.25rem 0.4rem;
+  color: #183d29;
+  background: #e5f1e9;
+  font-size: 0.82rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.demo-guide small {
+  margin-top: 0.45rem;
+  color: #738077;
+  font-size: 0.66rem;
+  line-height: 1.35;
+}
+
 .history-heading {
   display: flex;
   align-items: center;

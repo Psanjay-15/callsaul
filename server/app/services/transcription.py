@@ -176,6 +176,15 @@ class TranscriptionService:
             )
         if self.state.stage == ConversationStage.OFFERING_SLOTS:
             if self.state.available_slots:
+                if len(self.state.available_slots) == 1:
+                    slot = self.state.available_slots[0]
+                    self.state.selected_slot = slot
+                    self.state.booking_idempotency_key = str(uuid4())
+                    self.state.stage = ConversationStage.CONFIRMING_SLOT
+                    return (
+                        "Welcome back. The only available delivery slot is "
+                        f"{slot['label']}. Will that work for you?"
+                    )
                 options = " ".join(
                     f"{index}. {slot['label']}."
                     for index, slot in enumerate(
@@ -578,6 +587,16 @@ class TranscriptionService:
         self.state.available_slots = slots
         self.state.slot_confirmed = False
         self.state.booking_idempotency_key = None
+
+        if len(slots) == 1:
+            slot = slots[0]
+            await self.ask_to_confirm_slot(
+                slot,
+                "I found one available delivery slot: "
+                f"{slot['label']}. Will that work for you?",
+            )
+            return
+
         self.state.stage = ConversationStage.OFFERING_SLOTS
         await self.send_conversation_state()
 
@@ -733,14 +752,26 @@ class TranscriptionService:
         self.state.available_slots = slots
         self.state.selected_slot = None
         self.state.slot_confirmed = False
-        self.state.stage = ConversationStage.OFFERING_SLOTS
-        await self.send_conversation_state()
 
         if not slots:
+            self.state.stage = ConversationStage.OFFERING_SLOTS
+            await self.send_conversation_state()
             await self.send_assistant_message(
                 "I am sorry, but there are no delivery slots available right now."
             )
             return
+
+        if len(slots) == 1:
+            slot = slots[0]
+            await self.ask_to_confirm_slot(
+                slot,
+                "I found one available delivery slot: "
+                f"{slot['label']}. Will that work for you?",
+            )
+            return
+
+        self.state.stage = ConversationStage.OFFERING_SLOTS
+        await self.send_conversation_state()
 
         position_names = ["First", "Second", "Third"]
         options = " ".join(
@@ -825,6 +856,31 @@ class TranscriptionService:
                 return
 
         if decision["tool"] == "reject_delivery_slot":
+            if len(self.state.available_slots) == 1:
+                booked_slot = (
+                    await get_booked_slot(self.state.tracking_id)
+                    if self.state.tracking_id
+                    else None
+                )
+                self.state.available_slots = []
+                self.state.selected_slot = booked_slot
+                self.state.slot_confirmed = False
+                self.state.booking_idempotency_key = None
+                self.state.stage = ConversationStage.COMPLETED
+                await self.send_conversation_state()
+                if booked_slot:
+                    await self.send_assistant_message(
+                        "No problem. I have not changed your delivery. There are no "
+                        "other available slots right now. Your delivery remains "
+                        f"scheduled for {booked_slot['label']}."
+                    )
+                else:
+                    await self.send_assistant_message(
+                        "No problem. I have not booked that slot, and there are no "
+                        "other available slots right now. You can try again later."
+                    )
+                return
+
             self.state.selected_slot = None
             self.state.slot_confirmed = False
             self.state.booking_idempotency_key = None
@@ -856,7 +912,11 @@ class TranscriptionService:
             None,
         )
 
-    async def ask_to_confirm_slot(self, slot: dict) -> None:
+    async def ask_to_confirm_slot(
+        self,
+        slot: dict,
+        message: str | None = None,
+    ) -> None:
         current_slot_id = (
             self.state.selected_slot.get("slot_id")
             if self.state.selected_slot
@@ -870,7 +930,7 @@ class TranscriptionService:
         self.state.stage = ConversationStage.CONFIRMING_SLOT
         await self.send_conversation_state()
         await self.send_assistant_message(
-            f"You selected {slot['label']}. Will that work for you?"
+            message or f"You selected {slot['label']}. Will that work for you?"
         )
 
     async def book_selected_slot(self) -> None:

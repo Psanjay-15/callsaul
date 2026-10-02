@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useAudioPlayer } from "./hooks/useAudioPlayer.js";
 import { useMicrophone } from "./hooks/useMicrophone.js";
 import { useWebSocket } from "./hooks/useWebSocket.js";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
-
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
 function clearSavedSessionReference() {
   localStorage.removeItem("callsaul_session_id");
@@ -16,7 +16,6 @@ function clearSavedSessionReference() {
   window.history.replaceState({}, "", pageUrl);
 }
 
-
 function formatActivity(value) {
   if (!value) return "New chat";
   return new Intl.DateTimeFormat(undefined, {
@@ -25,12 +24,12 @@ function formatActivity(value) {
   }).format(new Date(value));
 }
 
-
 export default function App() {
   const [input, setInput] = useState("");
   const [history, setHistory] = useState([]);
   const [historyError, setHistoryError] = useState("");
   const [deletingSessionId, setDeletingSessionId] = useState("");
+  const conversationRef = useRef(null);
   const loadHistory = useCallback(async () => {
     try {
       const response = await fetch(`${API_BASE_URL}/api/history`);
@@ -101,6 +100,16 @@ export default function App() {
     if (!isConnected && isRecording) stopMicrophone();
   }, [isConnected, isRecording, stopMicrophone]);
 
+  useEffect(() => {
+    const conversation = conversationRef.current;
+    if (!conversation || messages.length === 0) return undefined;
+
+    const frame = window.requestAnimationFrame(() => {
+      conversation.scrollTop = conversation.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [messages, sessionId]);
+
   function handleSubmit(event) {
     event.preventDefault();
     if (sendMessage(input)) setInput("");
@@ -168,14 +177,28 @@ export default function App() {
             <h1>CallSaul</h1>
           </div>
 
-          <button className="new-chat-button" type="button" onClick={startNewChat}>
+          <button
+            className="new-chat-button"
+            type="button"
+            onClick={startNewChat}
+          >
             <span aria-hidden="true">+</span>
             New chat
           </button>
 
+          <div className="demo-guide">
+            <strong>How to test</strong>
+            <p>Start a new chat, then say or type the demo tracking ID:</p>
+            <code>BD098765</code>
+          </div>
+
           <div className="history-heading">
             <span>History</span>
-            <button type="button" onClick={loadHistory} aria-label="Refresh history">
+            <button
+              type="button"
+              onClick={loadHistory}
+              aria-label="Refresh history"
+            >
               Refresh
             </button>
           </div>
@@ -205,7 +228,9 @@ export default function App() {
                   disabled={deletingSessionId === session.session_id}
                   onClick={() => deleteChat(session)}
                 >
-                  {deletingSessionId === session.session_id ? "Deleting…" : "Delete"}
+                  {deletingSessionId === session.session_id
+                    ? "Deleting…"
+                    : "Delete"}
                 </button>
               </div>
             ))}
@@ -214,7 +239,6 @@ export default function App() {
             )}
             {historyError && <p className="history-error">{historyError}</p>}
           </nav>
-
         </aside>
 
         <section className="agent-card">
@@ -231,10 +255,13 @@ export default function App() {
 
           {!isConnected ? (
             <div className="empty-chat">
-              <div className="empty-chat-icon" aria-hidden="true">CS</div>
+              <div className="empty-chat-icon" aria-hidden="true">
+                CS
+              </div>
               <h3>Choose a conversation</h3>
               <p>
-                Select a chat from the history or start a new delivery conversation.
+                Select a chat from the history or start a new delivery
+                conversation.
               </p>
               <button
                 className="secondary-button compact"
@@ -247,11 +274,17 @@ export default function App() {
           ) : (
             <>
               <div className="session-strip">
-                <span>{sessionResumed ? "Resumed session" : "New session"}</span>
+                <span>
+                  {sessionResumed ? "Resumed session" : "New session"}
+                </span>
                 <code>{sessionId}</code>
               </div>
 
-              <div className="conversation" aria-live="polite">
+              <div
+                className="conversation"
+                aria-live="polite"
+                ref={conversationRef}
+              >
                 {messages.map((message) => (
                   <div className={`message ${message.role}`} key={message.id}>
                     <span>
@@ -276,7 +309,9 @@ export default function App() {
                   </p>
                 </div>
                 <button
-                  className={isRecording ? "stop-recording-button" : "recording-button"}
+                  className={
+                    isRecording ? "stop-recording-button" : "recording-button"
+                  }
                   type="button"
                   onClick={isRecording ? stopCurrentChat : startMicrophone}
                   disabled={microphoneStatus === "requesting_permission"}
@@ -295,7 +330,11 @@ export default function App() {
                     placeholder="Type a message..."
                     value={input}
                   />
-                  <button className="send-button" type="submit" disabled={!input.trim()}>
+                  <button
+                    className="send-button"
+                    type="submit"
+                    disabled={!input.trim()}
+                  >
                     Send
                   </button>
                 </div>
@@ -304,7 +343,9 @@ export default function App() {
               <details className="technical-status">
                 <summary>Connection details</summary>
                 <div className="technical-grid">
-                  <span>Microphone: {microphoneStatus.replaceAll("_", " ")}</span>
+                  <span>
+                    Microphone: {microphoneStatus.replaceAll("_", " ")}
+                  </span>
                   <span>STT: {sttStatus}</span>
                   <span>Turn: {turnEvent}</span>
                   <span>OpenAI: {llmStatus}</span>

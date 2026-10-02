@@ -189,10 +189,17 @@ class LLMService:
         slot_list = "\n".join(
             f"{slot['slot_id']}: {slot['label']}" for slot in available_slots
         )
+        single_slot_instruction = (
+            "There is only one available slot. If the caller asks for another slot "
+            "or asks whether other options are available, call reject_delivery_slot. "
+            if len(available_slots) == 1
+            else ""
+        )
 
         return await self._get_tool_decision(
             instructions=(
                 f"The caller is confirming the delivery slot {selected_slot['label']}. "
+                f"{single_slot_instruction}"
                 "Call confirm_delivery_slot only for a clear yes. Call reject_delivery_slot "
                 "for a clear no without another choice. If they choose a different offered "
                 "slot in this current statement, call change_delivery_slot. Never infer a "
