@@ -16,6 +16,7 @@ function getWebSocketUrl() {
 export function useWebSocket() {
   const [status, setStatus] = useState("disconnected");
   const [messages, setMessages] = useState([]);
+  const [audioStats, setAudioStats] = useState({ chunks: 0, bytes: 0 });
   const [error, setError] = useState("");
   const socketRef = useRef(null);
 
@@ -37,6 +38,7 @@ export function useWebSocket() {
 
     setError("");
     setMessages([]);
+    setAudioStats({ chunks: 0, bytes: 0 });
     setStatus("connecting");
 
     const socket = new WebSocket(getWebSocketUrl());
@@ -55,6 +57,10 @@ export function useWebSocket() {
       }
 
       if (payload.type === "error") setError(payload.message);
+
+      if (payload.type === "audio_received" || payload.type === "audio_stopped") {
+        setAudioStats({ chunks: payload.chunks, bytes: payload.bytes });
+      }
     };
 
     socket.onerror = () => setError("Could not connect to the WebSocket server.");
@@ -78,8 +84,33 @@ export function useWebSocket() {
     return true;
   }, []);
 
+  const sendControl = useCallback((type, details = {}) => {
+    const socket = socketRef.current;
+    if (socket?.readyState !== WebSocket.OPEN) return false;
+
+    socket.send(JSON.stringify({ type, ...details }));
+    return true;
+  }, []);
+
+  const sendAudio = useCallback((audio) => {
+    const socket = socketRef.current;
+    if (socket?.readyState !== WebSocket.OPEN) return false;
+
+    socket.send(audio);
+    return true;
+  }, []);
+
   useEffect(() => disconnect, [disconnect]);
 
-  return { connect, disconnect, error, messages, sendMessage, status };
+  return {
+    audioStats,
+    connect,
+    disconnect,
+    error,
+    messages,
+    sendAudio,
+    sendControl,
+    sendMessage,
+    status,
+  };
 }
-

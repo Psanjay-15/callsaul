@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import { useMicrophone } from "./hooks/useMicrophone.js";
 import { useWebSocket } from "./hooks/useWebSocket.js";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
@@ -8,8 +9,23 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000
 export default function App() {
   const [apiStatus, setApiStatus] = useState("Checking backend...");
   const [input, setInput] = useState("");
-  const { connect, disconnect, error, messages, sendMessage, status } =
-    useWebSocket();
+  const {
+    audioStats,
+    connect,
+    disconnect,
+    error: websocketError,
+    messages,
+    sendAudio,
+    sendControl,
+    sendMessage,
+    status,
+  } = useWebSocket();
+  const {
+    error: microphoneError,
+    start: startMicrophone,
+    status: microphoneStatus,
+    stop: stopMicrophone,
+  } = useMicrophone({ sendAudio, sendControl });
 
   useEffect(() => {
     async function checkBackend() {
@@ -33,6 +49,16 @@ export default function App() {
   }
 
   const isConnected = status === "connected";
+  const isRecording = microphoneStatus === "recording";
+
+  useEffect(() => {
+    if (!isConnected && isRecording) stopMicrophone();
+  }, [isConnected, isRecording, stopMicrophone]);
+
+  function handleDisconnect() {
+    stopMicrophone();
+    disconnect();
+  }
 
   return (
     <main className="page-shell">
@@ -40,7 +66,7 @@ export default function App() {
         <p className="eyebrow">Courier delivery assistant</p>
         <h1>CallSaul</h1>
         <p className="description">
-          Verify the browser and FastAPI WebSocket connection before adding voice logic.
+          Verify browser microphone audio streaming before adding speech recognition.
         </p>
 
         <div className="status-grid">
@@ -60,6 +86,26 @@ export default function App() {
           </button>
         ) : (
           <>
+            <div className="audio-panel">
+              <div>
+                <span>Microphone</span>
+                <strong>{microphoneStatus.replaceAll("_", " ")}</strong>
+              </div>
+              <div className="audio-stats">
+                <span>{audioStats.chunks} chunks</span>
+                <span>{audioStats.bytes.toLocaleString()} bytes received</span>
+              </div>
+              <button
+                className={isRecording ? "stop-recording-button" : "recording-button"}
+                type="button"
+                onClick={isRecording ? stopMicrophone : startMicrophone}
+                disabled={microphoneStatus === "requesting_permission"}
+              >
+                {isRecording ? "Stop microphone" : "Start microphone"}
+              </button>
+              <p>Audio is sent to FastAPI but is not transcribed or stored.</p>
+            </div>
+
             <div className="conversation" aria-live="polite">
               {messages.map((message) => (
                 <div className={`message ${message.role}`} key={message.id}>
@@ -85,13 +131,20 @@ export default function App() {
               </div>
             </form>
 
-            <button className="secondary-button" type="button" onClick={disconnect}>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={handleDisconnect}
+              disabled={isRecording}
+            >
               Disconnect
             </button>
           </>
         )}
 
-        {error && <p className="error-message">{error}</p>}
+        {(websocketError || microphoneError) && (
+          <p className="error-message">{websocketError || microphoneError}</p>
+        )}
       </section>
     </main>
   );

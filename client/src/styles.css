@@ -126,6 +126,48 @@ h1 {
   background: #e9efeb;
 }
 
+.audio-panel {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+  border: 1px solid #dbe5de;
+  border-radius: 1rem;
+  padding: 1rem;
+  background: #f8faf9;
+}
+
+.audio-panel > div:first-child,
+.audio-stats {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.audio-panel span,
+.audio-panel p {
+  color: #68776e;
+  font-size: 0.82rem;
+}
+
+.audio-panel strong {
+  color: #1e6140;
+  text-transform: capitalize;
+}
+
+.audio-panel p {
+  margin: 0;
+}
+
+.recording-button {
+  color: #ffffff;
+  background: #24734a;
+}
+
+.stop-recording-button {
+  color: #ffffff;
+  background: #b13c3c;
+}
+
 .conversation {
   height: 20rem;
   margin-top: 1.5rem;
