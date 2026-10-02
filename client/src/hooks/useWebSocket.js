@@ -13,7 +13,7 @@ function getWebSocketUrl() {
 }
 
 
-export function useWebSocket() {
+export function useWebSocket({ onAudio, onTtsStart } = {}) {
   const [status, setStatus] = useState("disconnected");
   const [messages, setMessages] = useState([]);
   const [audioStats, setAudioStats] = useState({ chunks: 0, bytes: 0 });
@@ -21,9 +21,11 @@ export function useWebSocket() {
   const [liveTranscript, setLiveTranscript] = useState("");
   const [sttStatus, setSttStatus] = useState("disconnected");
   const [llmStatus, setLlmStatus] = useState("idle");
+  const [ttsStatus, setTtsStatus] = useState("idle");
   const [turnEvent, setTurnEvent] = useState("idle");
   const [error, setError] = useState("");
   const socketRef = useRef(null);
+  const assistantMessageIdRef = useRef(null);
 
   const disconnect = useCallback(() => {
     const socket = socketRef.current;
@@ -48,15 +50,23 @@ export function useWebSocket() {
     setLiveTranscript("");
     setSttStatus("disconnected");
     setLlmStatus("idle");
+    setTtsStatus("idle");
     setTurnEvent("idle");
+    assistantMessageIdRef.current = null;
     setStatus("connecting");
 
     const socket = new WebSocket(getWebSocketUrl());
+    socket.binaryType = "arraybuffer";
     socketRef.current = socket;
 
     socket.onopen = () => setStatus("connected");
 
     socket.onmessage = (event) => {
+      if (event.data instanceof ArrayBuffer) {
+        onAudio?.(event.data);
+        return;
+      }
+
       const payload = JSON.parse(event.data);
 
       if (payload.type === "connected" || payload.type === "message") {
@@ -73,11 +83,48 @@ export function useWebSocket() {
         ]);
       }
 
+      if (payload.type === "llm_start") {
+        const messageId = crypto.randomUUID();
+        assistantMessageIdRef.current = messageId;
+        setMessages((current) => [
+          ...current,
+          { id: messageId, role: "assistant", text: "" },
+        ]);
+      }
+
+      if (payload.type === "llm_delta") {
+        const messageId = assistantMessageIdRef.current;
+        if (messageId) {
+          setMessages((current) =>
+            current.map((message) =>
+              message.id === messageId
+                ? { ...message, text: message.text + payload.delta }
+                : message,
+            ),
+          );
+        }
+      }
+
+      if (payload.type === "llm_done") {
+        assistantMessageIdRef.current = null;
+      }
+
       if (payload.type === "llm_status") setLlmStatus(payload.status);
 
       if (payload.type === "llm_error") {
         setError(payload.message);
         setLlmStatus("error");
+      }
+
+      if (payload.type === "tts_audio_start") {
+        onTtsStart?.(payload.sample_rate);
+      }
+
+      if (payload.type === "tts_status") setTtsStatus(payload.status);
+
+      if (payload.type === "tts_error") {
+        setError(payload.message);
+        setTtsStatus("error");
       }
 
       if (payload.type === "error") setError(payload.message);
@@ -120,8 +167,9 @@ export function useWebSocket() {
       socketRef.current = null;
       setStatus("disconnected");
       setSttStatus("disconnected");
+      setTtsStatus("disconnected");
     };
-  }, []);
+  }, [onAudio, onTtsStart]);
 
   const sendMessage = useCallback((text) => {
     const cleanText = text.trim();
@@ -168,6 +216,7 @@ export function useWebSocket() {
     sendMessage,
     status,
     sttStatus,
+    ttsStatus,
     turnEvent,
   };
 }

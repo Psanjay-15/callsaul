@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     mongodb_db_name: str = "callsaul"
     deepgram_api_key: str = ""
     deepgram_stt_model: str = "flux-general-en"
+    deepgram_tts_model: str = "flux-alexis-en"
+    deepgram_tts_sample_rate: int = 24000
     openai_api_key: str = ""
     openai_model: str = "gpt-4.1-mini-2025-04-14"
 

@@ -5,9 +5,10 @@ from contextlib import suppress
 from deepgram.core.events import EventType
 from fastapi import WebSocket, WebSocketDisconnect
 
+from app.clients.deepgram import create_deepgram_client
 from app.config.settings import settings
 from app.services.llm import LLMService
-from app.stt.deepgram_client import create_deepgram_client
+from app.services.tts import TTSService
 
 
 class TranscriptionService:
@@ -15,6 +16,7 @@ class TranscriptionService:
         self.websocket = websocket
         self.send_lock = asyncio.Lock()
         self.llm = LLMService()
+        self.tts = TTSService(self.send_audio, self.send)
         self.connection_context = None
         self.connection = None
         self.listener_task: asyncio.Task | None = None
@@ -48,6 +50,7 @@ class TranscriptionService:
             pass
         finally:
             await self.close_deepgram_stream()
+            await self.tts.close()
 
     async def handle_control(self, raw_message: str) -> bool:
         try:
@@ -209,10 +212,59 @@ class TranscriptionService:
             await self.send({"type": "error", "message": "Message cannot be empty."})
             return
 
-        await self.send({"type": "llm_status", "status": "thinking"})
+        await self.send({"type": "llm_status", "status": "streaming"})
+        await self.send({"type": "llm_start"})
+
+        tts_ready = False
         try:
-            response = await self.llm.get_response(text.strip())
-            await self.send({"type": "llm_response", "message": response})
+            await self.tts.connect()
+            tts_ready = True
+            await self.send(
+                {
+                    "type": "tts_audio_start",
+                    "sample_rate": settings.deepgram_tts_sample_rate,
+                }
+            )
+        except Exception as error:
+            await self.send(
+                {
+                    "type": "tts_error",
+                    "message": f"Could not connect to Deepgram TTS: {error}",
+                }
+            )
+
+        full_response = ""
+        try:
+            async for delta in self.llm.stream_response(text.strip()):
+                full_response += delta
+                await self.send({"type": "llm_delta", "delta": delta})
+
+                if tts_ready:
+                    try:
+                        await self.tts.send_text(delta)
+                    except Exception as error:
+                        tts_ready = False
+                        await self.send(
+                            {
+                                "type": "tts_error",
+                                "message": f"Could not stream text to Deepgram TTS: {error}",
+                            }
+                        )
+
+            if tts_ready:
+                try:
+                    await self.tts.flush()
+                except Exception as error:
+                    await self.send(
+                        {
+                            "type": "tts_error",
+                            "message": f"Could not finish Deepgram speech: {error}",
+                        }
+                    )
+
+            await self.send(
+                {"type": "llm_done", "message": full_response.strip()}
+            )
         except Exception as error:
             await self.send(
                 {
@@ -226,3 +278,7 @@ class TranscriptionService:
     async def send(self, payload: dict) -> None:
         async with self.send_lock:
             await self.websocket.send_json(payload)
+
+    async def send_audio(self, audio: bytes) -> None:
+        async with self.send_lock:
+            await self.websocket.send_bytes(audio)

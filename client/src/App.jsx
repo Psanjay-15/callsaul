@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import { useAudioPlayer } from "./hooks/useAudioPlayer.js";
 import { useMicrophone } from "./hooks/useMicrophone.js";
 import { useWebSocket } from "./hooks/useWebSocket.js";
 
@@ -9,6 +10,13 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000
 export default function App() {
   const [apiStatus, setApiStatus] = useState("Checking backend...");
   const [input, setInput] = useState("");
+  const {
+    appendAudio,
+    prepare: prepareAudio,
+    setSampleRate,
+    status: playbackStatus,
+    stop: stopAudio,
+  } = useAudioPlayer();
   const {
     audioStats,
     connect,
@@ -23,8 +31,9 @@ export default function App() {
     sendMessage,
     status,
     sttStatus,
+    ttsStatus,
     turnEvent,
-  } = useWebSocket();
+  } = useWebSocket({ onAudio: appendAudio, onTtsStart: setSampleRate });
   const {
     error: microphoneError,
     start: startMicrophone,
@@ -62,7 +71,13 @@ export default function App() {
 
   function handleDisconnect() {
     stopMicrophone();
+    stopAudio();
     disconnect();
+  }
+
+  async function handleConnect() {
+    await prepareAudio();
+    connect();
   }
 
   return (
@@ -86,7 +101,7 @@ export default function App() {
         </div>
 
         {!isConnected ? (
-          <button className="primary-button" type="button" onClick={connect}>
+          <button className="primary-button" type="button" onClick={handleConnect}>
             {status === "connecting" ? "Connecting..." : "Connect WebSocket"}
           </button>
         ) : (
@@ -106,6 +121,8 @@ export default function App() {
               </div>
               <div className="audio-stats">
                 <span>OpenAI: {llmStatus}</span>
+                <span>Deepgram TTS: {ttsStatus}</span>
+                <span>Playback: {playbackStatus}</span>
               </div>
               <button
                 className={isRecording ? "stop-recording-button" : "recording-button"}
