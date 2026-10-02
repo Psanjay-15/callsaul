@@ -18,6 +18,7 @@ class ConversationState:
     available_slots: list[dict] = field(default_factory=list)
     selected_slot: dict | None = None
     slot_confirmed: bool = False
+    booking_idempotency_key: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)

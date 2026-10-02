@@ -1,5 +1,6 @@
 import asyncio
 import json
+from uuid import uuid4
 from contextlib import suppress
 
 from deepgram.core.events import EventType
@@ -9,6 +10,7 @@ from app.clients.deepgram import create_deepgram_client
 from app.config.settings import settings
 from app.conversation import ConversationStage, ConversationState
 from app.services.llm import LLMService
+from app.services.slots import book_delivery_slot, get_available_slots
 from app.services.tracking import (
     find_delivery,
     is_valid_tracking_id,
@@ -299,6 +301,10 @@ class TranscriptionService:
                 await self.collect_tracking_id(text.strip())
             elif self.state.stage == ConversationStage.CONFIRMING_TRACKING_ID:
                 await self.confirm_tracking_id(text.strip())
+            elif self.state.stage == ConversationStage.OFFERING_SLOTS:
+                await self.select_slot(text.strip())
+            elif self.state.stage == ConversationStage.CONFIRMING_SLOT:
+                await self.confirm_slot(text.strip())
             else:
                 await self.send_to_llm(text.strip())
 
@@ -351,10 +357,7 @@ class TranscriptionService:
             self.state.tracking_id_confirmed = True
             self.state.stage = ConversationStage.OFFERING_SLOTS
             await self.send_conversation_state()
-            await self.send_assistant_message(
-                "Thank you. Your tracking ID is confirmed. "
-                "Next, I will check the available delivery slots."
-            )
+            await self.offer_available_slots()
             return
 
         if decision["tool"] == "replace_tracking_id":
@@ -419,6 +422,200 @@ class TranscriptionService:
         await self.send_assistant_message(
             f"I found tracking ID {tracking_id_for_speech(tracking_id)}. "
             "Is that correct?"
+        )
+
+    async def offer_available_slots(self) -> None:
+        try:
+            slots = await get_available_slots()
+        except Exception:
+            await self.send_assistant_message(
+                "I cannot check the available delivery slots right now. "
+                "Please try again."
+            )
+            return
+
+        self.state.available_slots = slots
+        self.state.selected_slot = None
+        self.state.slot_confirmed = False
+        self.state.stage = ConversationStage.OFFERING_SLOTS
+        await self.send_conversation_state()
+
+        if not slots:
+            await self.send_assistant_message(
+                "I am sorry, but there are no delivery slots available right now."
+            )
+            return
+
+        position_names = ["First", "Second", "Third"]
+        options = " ".join(
+            f"{position_names[index]}, {slot['label']}."
+            for index, slot in enumerate(slots)
+        )
+        await self.send_assistant_message(
+            f"Your tracking ID is confirmed. I found these delivery slots. "
+            f"{options} Which one works best for you?"
+        )
+
+    async def select_slot(self, text: str) -> None:
+        if not self.state.available_slots:
+            await self.offer_available_slots()
+            return
+
+        await self.send({"type": "llm_status", "status": "thinking"})
+        try:
+            decision = await self.llm.understand_slot_selection(
+                text,
+                self.state.available_slots,
+            )
+        except Exception as error:
+            await self.send(
+                {
+                    "type": "llm_error",
+                    "message": f"Could not understand the slot selection: {error}",
+                }
+            )
+            return
+        finally:
+            await self.send({"type": "llm_status", "status": "idle"})
+
+        if decision["tool"] != "select_delivery_slot":
+            message = decision["message"] or (
+                "Please choose one of the available delivery slots."
+            )
+            await self.send_assistant_message(message)
+            return
+
+        slot = self.find_offered_slot(decision["arguments"].get("slot_id"))
+        if slot is None:
+            await self.send_assistant_message(
+                "That slot was not one of the available options. Please choose again."
+            )
+            return
+
+        await self.ask_to_confirm_slot(slot)
+
+    async def confirm_slot(self, text: str) -> None:
+        await self.send({"type": "llm_status", "status": "thinking"})
+        try:
+            decision = await self.llm.understand_slot_confirmation(
+                text,
+                self.state.selected_slot,
+                self.state.available_slots,
+            )
+        except Exception as error:
+            await self.send(
+                {
+                    "type": "llm_error",
+                    "message": f"Could not understand the slot confirmation: {error}",
+                }
+            )
+            return
+        finally:
+            await self.send({"type": "llm_status", "status": "idle"})
+
+        if decision["tool"] == "confirm_delivery_slot":
+            self.state.slot_confirmed = True
+            self.state.stage = ConversationStage.BOOKING
+            await self.send_conversation_state()
+            await self.send_assistant_message(
+                f"Thank you. I will book {self.state.selected_slot['label']} now."
+            )
+            await self.book_selected_slot()
+            return
+
+        if decision["tool"] == "change_delivery_slot":
+            slot = self.find_offered_slot(decision["arguments"].get("slot_id"))
+            if slot is not None:
+                await self.ask_to_confirm_slot(slot)
+                return
+
+        if decision["tool"] == "reject_delivery_slot":
+            self.state.selected_slot = None
+            self.state.slot_confirmed = False
+            self.state.booking_idempotency_key = None
+            self.state.stage = ConversationStage.OFFERING_SLOTS
+            await self.send_conversation_state()
+            await self.send_assistant_message(
+                "No problem. Please choose another available delivery slot."
+            )
+            return
+
+        message = decision["message"] or (
+            "Please say yes if that slot works, or choose another available slot."
+        )
+        await self.send_assistant_message(message)
+
+    def find_offered_slot(self, slot_id: str | None) -> dict | None:
+        return next(
+            (
+                slot
+                for slot in self.state.available_slots
+                if slot["slot_id"] == slot_id
+            ),
+            None,
+        )
+
+    async def ask_to_confirm_slot(self, slot: dict) -> None:
+        current_slot_id = (
+            self.state.selected_slot.get("slot_id")
+            if self.state.selected_slot
+            else None
+        )
+        if current_slot_id != slot["slot_id"]:
+            self.state.booking_idempotency_key = str(uuid4())
+
+        self.state.selected_slot = slot
+        self.state.slot_confirmed = False
+        self.state.stage = ConversationStage.CONFIRMING_SLOT
+        await self.send_conversation_state()
+        await self.send_assistant_message(
+            f"You selected {slot['label']}. Will that work for you?"
+        )
+
+    async def book_selected_slot(self) -> None:
+        try:
+            result = await book_delivery_slot(
+                tracking_id=self.state.tracking_id,
+                slot_id=self.state.selected_slot["slot_id"],
+                idempotency_key=self.state.booking_idempotency_key,
+            )
+        except Exception:
+            self.state.stage = ConversationStage.CONFIRMING_SLOT
+            self.state.slot_confirmed = False
+            await self.send_conversation_state()
+            await self.send_assistant_message(
+                "I could not complete the booking. Your selected slot is saved. "
+                "Would you like me to try again?"
+            )
+            return
+
+        if result["status"] == "unavailable":
+            self.state.available_slots = []
+            self.state.selected_slot = None
+            self.state.slot_confirmed = False
+            self.state.booking_idempotency_key = None
+            self.state.stage = ConversationStage.OFFERING_SLOTS
+            await self.send_conversation_state()
+            await self.send_assistant_message(
+                "That slot was just taken. I will check the available slots again."
+            )
+            await self.offer_available_slots()
+            return
+
+        if result["status"] == "already_booked":
+            booked_slot = result["slot"]
+            self.state.stage = ConversationStage.COMPLETED
+            await self.send_conversation_state()
+            await self.send_assistant_message(
+                f"This delivery is already scheduled for {booked_slot['label']}."
+            )
+            return
+
+        self.state.stage = ConversationStage.COMPLETED
+        await self.send_conversation_state()
+        await self.send_assistant_message(
+            f"Done. Your delivery has been rescheduled to "
+            f"{self.state.selected_slot['label']}."
         )
 
     async def send_assistant_message(self, message: str) -> None:

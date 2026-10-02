@@ -136,6 +136,116 @@ class LLMService:
             ],
         )
 
+    async def understand_slot_selection(
+        self,
+        transcription: str,
+        available_slots: list[dict],
+    ) -> dict:
+        slot_ids = [slot["slot_id"] for slot in available_slots]
+        slot_list = "\n".join(
+            f"{index}. {slot['slot_id']}: {slot['label']}"
+            for index, slot in enumerate(available_slots, start=1)
+        )
+
+        return await self._get_tool_decision(
+            instructions=(
+                "The caller is choosing from the delivery slots listed below. "
+                "If they clearly select a slot by number, date, or time, call "
+                "select_delivery_slot with the matching slot ID. Never select a slot "
+                "that is not in the list. If they ask a question, want the options "
+                "repeated, or are unclear, answer briefly without calling the tool.\n"
+                f"Available slots:\n{slot_list}"
+            ),
+            transcription=transcription,
+            tools=[
+                {
+                    "type": "function",
+                    "name": "select_delivery_slot",
+                    "description": "Select one slot from the offered delivery slots.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "slot_id": {
+                                "type": "string",
+                                "enum": slot_ids,
+                                "description": "The selected offered slot ID.",
+                            }
+                        },
+                        "required": ["slot_id"],
+                        "additionalProperties": False,
+                    },
+                    "strict": True,
+                }
+            ],
+        )
+
+    async def understand_slot_confirmation(
+        self,
+        transcription: str,
+        selected_slot: dict,
+        available_slots: list[dict],
+    ) -> dict:
+        slot_ids = [slot["slot_id"] for slot in available_slots]
+        slot_list = "\n".join(
+            f"{slot['slot_id']}: {slot['label']}" for slot in available_slots
+        )
+
+        return await self._get_tool_decision(
+            instructions=(
+                f"The caller is confirming the delivery slot {selected_slot['label']}. "
+                "Call confirm_delivery_slot only for a clear yes. Call reject_delivery_slot "
+                "for a clear no without another choice. If they choose a different offered "
+                "slot, call change_delivery_slot. If the answer is unclear or is a question, "
+                "respond briefly and ask whether the selected slot will work.\n"
+                f"Offered slots:\n{slot_list}"
+            ),
+            transcription=transcription,
+            tools=[
+                {
+                    "type": "function",
+                    "name": "confirm_delivery_slot",
+                    "description": "Confirm that the selected delivery slot will work.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                        "additionalProperties": False,
+                    },
+                    "strict": True,
+                },
+                {
+                    "type": "function",
+                    "name": "reject_delivery_slot",
+                    "description": "Reject the selected slot without choosing another.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                        "additionalProperties": False,
+                    },
+                    "strict": True,
+                },
+                {
+                    "type": "function",
+                    "name": "change_delivery_slot",
+                    "description": "Change to another slot from the offered list.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "slot_id": {
+                                "type": "string",
+                                "enum": slot_ids,
+                                "description": "The newly selected offered slot ID.",
+                            }
+                        },
+                        "required": ["slot_id"],
+                        "additionalProperties": False,
+                    },
+                    "strict": True,
+                },
+            ],
+        )
+
     async def _get_tool_decision(
         self,
         instructions: str,
