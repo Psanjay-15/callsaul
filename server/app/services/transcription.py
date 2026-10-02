@@ -425,8 +425,22 @@ class TranscriptionService:
         )
 
     async def offer_available_slots(self) -> None:
+        slot_task = asyncio.create_task(
+            self.run_backend_operation(
+                get_available_slots(),
+                progress_messages=[
+                    "I am still checking the available slots. "
+                    "This is taking a little longer than usual.",
+                    "The delivery system is still responding. Thank you for waiting.",
+                ],
+            )
+        )
+        await self.send_assistant_message(
+            "Your tracking ID is confirmed. I am checking the available slots now."
+        )
+
         try:
-            slots = await get_available_slots()
+            slots = await slot_task
         except Exception:
             await self.send_assistant_message(
                 "I cannot check the available delivery slots right now. "
@@ -452,8 +466,7 @@ class TranscriptionService:
             for index, slot in enumerate(slots)
         )
         await self.send_assistant_message(
-            f"Your tracking ID is confirmed. I found these delivery slots. "
-            f"{options} Which one works best for you?"
+            f"I found these delivery slots. {options} Which one works best for you?"
         )
 
     async def select_slot(self, text: str) -> None:
@@ -574,10 +587,17 @@ class TranscriptionService:
 
     async def book_selected_slot(self) -> None:
         try:
-            result = await book_delivery_slot(
-                tracking_id=self.state.tracking_id,
-                slot_id=self.state.selected_slot["slot_id"],
-                idempotency_key=self.state.booking_idempotency_key,
+            result = await self.run_backend_operation(
+                book_delivery_slot(
+                    tracking_id=self.state.tracking_id,
+                    slot_id=self.state.selected_slot["slot_id"],
+                    idempotency_key=self.state.booking_idempotency_key,
+                ),
+                progress_messages=[
+                    "I am still booking your delivery slot. "
+                    "This is taking a little longer than usual.",
+                    "The booking system is still responding. Thank you for waiting.",
+                ],
             )
         except Exception:
             self.state.stage = ConversationStage.CONFIRMING_SLOT
@@ -617,6 +637,38 @@ class TranscriptionService:
             f"Done. Your delivery has been rescheduled to "
             f"{self.state.selected_slot['label']}."
         )
+
+    async def run_backend_operation(
+        self,
+        operation,
+        progress_messages: list[str],
+    ):
+        task = asyncio.create_task(operation)
+        await self.send({"type": "backend_status", "status": "working"})
+
+        try:
+            for message in progress_messages:
+                try:
+                    return await asyncio.wait_for(
+                        asyncio.shield(task),
+                        timeout=settings.fake_backend_progress_seconds,
+                    )
+                except TimeoutError:
+                    await self.send({"type": "backend_status", "status": "slow"})
+                    await self.send_assistant_message(message)
+
+            try:
+                return await asyncio.wait_for(
+                    asyncio.shield(task),
+                    timeout=settings.fake_backend_progress_seconds,
+                )
+            except TimeoutError as error:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+                raise RuntimeError("The backend operation timed out") from error
+        finally:
+            await self.send({"type": "backend_status", "status": "idle"})
 
     async def send_assistant_message(self, message: str) -> None:
         await self.send({"type": "llm_start"})

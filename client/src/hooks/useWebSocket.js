@@ -22,6 +22,7 @@ export function useWebSocket({ onAudio, onTtsStart } = {}) {
   const [sttStatus, setSttStatus] = useState("disconnected");
   const [llmStatus, setLlmStatus] = useState("idle");
   const [ttsStatus, setTtsStatus] = useState("idle");
+  const [backendStatus, setBackendStatus] = useState("idle");
   const [conversationStage, setConversationStage] = useState("not_started");
   const [turnEvent, setTurnEvent] = useState("idle");
   const [error, setError] = useState("");
@@ -52,6 +53,7 @@ export function useWebSocket({ onAudio, onTtsStart } = {}) {
     setSttStatus("disconnected");
     setLlmStatus("idle");
     setTtsStatus("idle");
+    setBackendStatus("idle");
     setConversationStage("not_started");
     setTurnEvent("idle");
     assistantMessageIdRef.current = null;
@@ -80,6 +82,10 @@ export function useWebSocket({ onAudio, onTtsStart } = {}) {
 
       if (payload.type === "conversation_state") {
         setConversationStage(payload.stage);
+      }
+
+      if (payload.type === "backend_status") {
+        setBackendStatus(payload.status);
       }
 
       if (payload.type === "llm_response") {
@@ -174,6 +180,7 @@ export function useWebSocket({ onAudio, onTtsStart } = {}) {
       setStatus("disconnected");
       setSttStatus("disconnected");
       setTtsStatus("disconnected");
+      setBackendStatus("idle");
       setConversationStage("not_started");
     };
   }, [onAudio, onTtsStart]);
@@ -211,6 +218,7 @@ export function useWebSocket({ onAudio, onTtsStart } = {}) {
 
   return {
     audioStats,
+    backendStatus,
     connect,
     conversationStage,
     disconnect,

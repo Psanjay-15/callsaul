@@ -4,6 +4,7 @@ from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from app.config.database import get_database
+from app.services.fake_backend import simulate_backend_behavior
 
 
 def build_fake_slots() -> list[dict]:
@@ -62,6 +63,7 @@ async def seed_fake_slots() -> None:
 
 
 async def get_available_slots(limit: int = 3) -> list[dict]:
+    await simulate_backend_behavior("get_available_slots")
     database = get_database()
     today = date.today().isoformat()
     cursor = (
@@ -83,6 +85,7 @@ async def book_delivery_slot(
     slot_id: str,
     idempotency_key: str,
 ) -> dict:
+    await simulate_backend_behavior("book_delivery_slot")
     database = get_database()
     booked_at = datetime.now(timezone.utc)
 

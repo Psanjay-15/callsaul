@@ -19,6 +19,7 @@ export default function App() {
   } = useAudioPlayer();
   const {
     audioStats,
+    backendStatus,
     connect,
     conversationStage,
     disconnect,
@@ -129,6 +130,7 @@ export default function App() {
                 <span>
                   Conversation: {conversationStage.replaceAll("_", " ")}
                 </span>
+                <span>Backend: {backendStatus}</span>
               </div>
               <button
                 className={isRecording ? "stop-recording-button" : "recording-button"}
