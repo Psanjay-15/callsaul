@@ -189,7 +189,9 @@ export default function App() {
           <div className="demo-guide">
             <strong>How to test</strong>
             <p>Start a new chat, then say or type the demo tracking ID:</p>
-            <code>BD098765</code>
+            <code>BD418207</code>
+            <code>CS123456</code>
+            <code>AX654321</code>
           </div>
 
           <div className="history-heading">

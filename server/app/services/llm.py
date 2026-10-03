@@ -5,6 +5,53 @@ from app.clients.openai import create_openai_client
 from app.config.settings import settings
 
 
+RECENT_MESSAGE_LIMIT = 12
+
+
+def provide_tracking_id_tool() -> dict:
+    return {
+        "type": "function",
+        "name": "provide_tracking_id",
+        "description": "Return the tracking ID already saved in this conversation.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    }
+
+
+def provide_delivery_detail_tool() -> dict:
+    return {
+        "type": "function",
+        "name": "provide_delivery_detail",
+        "description": (
+            "Return a factual detail about the delivery already identified in this "
+            "conversation. Use this for the customer name, customer number, delivery "
+            "status, or currently selected delivery time."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "field": {
+                    "type": "string",
+                    "enum": [
+                        "customer_name",
+                        "customer_number",
+                        "delivery_status",
+                        "delivery_time",
+                    ],
+                }
+            },
+            "required": ["field"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    }
+
+
 class LLMService:
     def __init__(self) -> None:
         self.client = create_openai_client()
@@ -16,7 +63,7 @@ class LLMService:
                 "You are a helpful voice assistant. "
                 "Answer clearly and keep the response brief."
             ),
-            input=history,
+            input=history[-RECENT_MESSAGE_LIMIT:],
             stream=True,
         )
 
@@ -28,6 +75,7 @@ class LLMService:
         self,
         transcription: str,
         current_tracking_id: str | None = None,
+        history: list[dict] | None = None,
     ) -> dict:
         previous_candidate = (
             f"The previously heard candidate was {current_tracking_id}. "
@@ -48,6 +96,7 @@ class LLMService:
                 "an ID, answer their question briefly and ask for the tracking ID again."
             ),
             transcription=transcription,
+            history=history,
             tools=[
                 {
                     "type": "function",
@@ -75,6 +124,7 @@ class LLMService:
         self,
         transcription: str,
         current_tracking_id: str,
+        history: list[dict] | None = None,
     ) -> dict:
         return await self._get_tool_decision(
             instructions=(
@@ -83,10 +133,15 @@ class LLMService:
                 "for a clear no without a replacement. If the caller corrects any "
                 "letter or digit, call replace_tracking_id with the complete corrected "
                 "tracking ID. Understand corrections such as 'B as in Bravo, not D'. "
+                "If the caller asks what tracking ID is saved, call provide_tracking_id. "
+                "If they ask for the customer name, customer number, delivery status, "
+                "or delivery time, call provide_delivery_detail. Answer their direct "
+                "delivery question before returning to confirmation. "
                 "If the answer is unclear or is a question, respond briefly and ask "
                 "whether the current tracking ID is correct."
             ),
             transcription=transcription,
+            history=history,
             tools=[
                 {
                     "type": "function",
@@ -133,6 +188,8 @@ class LLMService:
                     },
                     "strict": True,
                 },
+                provide_tracking_id_tool(),
+                provide_delivery_detail_tool(),
             ],
         )
 
@@ -140,6 +197,7 @@ class LLMService:
         self,
         transcription: str,
         available_slots: list[dict],
+        history: list[dict] | None = None,
     ) -> dict:
         slot_ids = [slot["slot_id"] for slot in available_slots]
         slot_list = "\n".join(
@@ -153,10 +211,14 @@ class LLMService:
                 "If they clearly select a slot by number, date, or time, call "
                 "select_delivery_slot with the matching slot ID. Never select a slot "
                 "that is not in the list. If they ask a question, want the options "
-                "repeated, or are unclear, answer briefly without calling the tool.\n"
+                "repeated, or are unclear, answer briefly without calling the tool. "
+                "If they ask what tracking ID is saved, call provide_tracking_id.\n"
+                "If they ask for the customer name, customer number, delivery status, "
+                "or delivery time, call provide_delivery_detail.\n"
                 f"Available slots:\n{slot_list}"
             ),
             transcription=transcription,
+            history=history,
             tools=[
                 {
                     "type": "function",
@@ -175,7 +237,9 @@ class LLMService:
                         "additionalProperties": False,
                     },
                     "strict": True,
-                }
+                },
+                provide_tracking_id_tool(),
+                provide_delivery_detail_tool(),
             ],
         )
 
@@ -184,6 +248,7 @@ class LLMService:
         transcription: str,
         selected_slot: dict,
         available_slots: list[dict],
+        history: list[dict] | None = None,
     ) -> dict:
         slot_ids = [slot["slot_id"] for slot in available_slots]
         slot_list = "\n".join(
@@ -205,11 +270,15 @@ class LLMService:
                 "slot in this current statement, call change_delivery_slot. Never infer a "
                 "slot from an earlier statement. If they only say they want to change, call "
                 "reject_delivery_slot so the options can be presented again. If the answer "
+                "asks what tracking ID is saved, call provide_tracking_id. If it "
+                "asks for the customer name, customer number, delivery status, or delivery "
+                "time, call provide_delivery_detail. Otherwise, if it "
                 "is unclear or is a question, respond briefly and ask whether the selected "
                 "slot will work.\n"
                 f"Offered slots:\n{slot_list}"
             ),
             transcription=transcription,
+            history=history,
             tools=[
                 {
                     "type": "function",
@@ -253,6 +322,8 @@ class LLMService:
                     },
                     "strict": True,
                 },
+                provide_tracking_id_tool(),
+                provide_delivery_detail_tool(),
             ],
         )
 
@@ -261,6 +332,7 @@ class LLMService:
         transcription: str,
         current_slot: dict | None,
         tracking_id: str | None,
+        history: list[dict] | None = None,
     ) -> dict:
         current_slot_label = (
             current_slot.get("label", "the current time")
@@ -272,6 +344,8 @@ class LLMService:
                 f"The caller's delivery is currently scheduled for {current_slot_label}. "
                 f"The saved tracking ID is {tracking_id or 'not available'}. "
                 "If the caller asks for their tracking ID, call provide_tracking_id. "
+                "If they ask for the customer name, customer number, delivery status, "
+                "or delivery time, call provide_delivery_detail. "
                 "If the caller wants to change, move, or reschedule the delivery time, "
                 "call start_delivery_reschedule. This includes requests that name a new "
                 "time, such as 'change it to 10 AM'. Do not claim that a requested time "
@@ -279,19 +353,10 @@ class LLMService:
                 "briefly without calling the tool."
             ),
             transcription=transcription,
+            history=history,
             tools=[
-                {
-                    "type": "function",
-                    "name": "provide_tracking_id",
-                    "description": "Return the saved tracking ID to the caller.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {},
-                        "required": [],
-                        "additionalProperties": False,
-                    },
-                    "strict": True,
-                },
+                provide_tracking_id_tool(),
+                provide_delivery_detail_tool(),
                 {
                     "type": "function",
                     "name": "start_delivery_reschedule",
@@ -314,8 +379,26 @@ class LLMService:
         instructions: str,
         transcription: str,
         tools: list[dict],
+        history: list[dict] | None = None,
     ) -> dict:
-        input_messages = [{"role": "user", "content": transcription}]
+        input_messages = [
+            {
+                "role": message["role"],
+                "content": message["content"],
+            }
+            for message in (history or [])[-RECENT_MESSAGE_LIMIT:]
+            if message.get("role") in {"user", "assistant"}
+            and message.get("content")
+        ]
+        current_message_is_present = (
+            input_messages
+            and input_messages[-1]["role"] == "user"
+            and input_messages[-1]["content"].strip() == transcription.strip()
+        )
+        if not current_message_is_present:
+            input_messages.append({"role": "user", "content": transcription})
+        input_messages = input_messages[-RECENT_MESSAGE_LIMIT:]
+
         response = await self.client.responses.create(
             model=settings.openai_model,
             instructions=instructions,

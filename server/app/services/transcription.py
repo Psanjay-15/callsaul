@@ -519,6 +519,7 @@ class TranscriptionService:
                 text,
                 self.state.selected_slot,
                 self.state.tracking_id,
+                history=self.llm_history(),
             )
         except Exception as error:
             await self.send(
@@ -536,15 +537,13 @@ class TranscriptionService:
             return
 
         if decision["tool"] == "provide_tracking_id":
-            if self.state.tracking_id:
-                await self.send_assistant_message(
-                    "Your tracking ID is "
-                    f"{tracking_id_for_speech(self.state.tracking_id)}."
-                )
-            else:
-                await self.send_assistant_message(
-                    "I do not have a tracking ID saved for this conversation."
-                )
+            await self.provide_saved_tracking_id()
+            return
+
+        if decision["tool"] == "provide_delivery_detail":
+            await self.provide_delivery_detail(
+                decision["arguments"].get("field")
+            )
             return
 
         message = decision["message"] or (
@@ -615,6 +614,7 @@ class TranscriptionService:
             decision = await self.llm.understand_tracking_id(
                 text,
                 self.state.tracking_id,
+                history=self.llm_history(),
             )
         except Exception as error:
             await self.send(
@@ -642,6 +642,7 @@ class TranscriptionService:
             decision = await self.llm.understand_tracking_confirmation(
                 text,
                 self.state.tracking_id,
+                history=self.llm_history(),
             )
         except Exception as error:
             await self.send(
@@ -653,6 +654,16 @@ class TranscriptionService:
             return
         finally:
             await self.send({"type": "llm_status", "status": "idle"})
+
+        if decision["tool"] == "provide_tracking_id":
+            await self.provide_saved_tracking_id()
+            return
+
+        if decision["tool"] == "provide_delivery_detail":
+            await self.provide_delivery_detail(
+                decision["arguments"].get("field")
+            )
+            return
 
         if decision["tool"] == "confirm_tracking_id":
             self.state.tracking_id_confirmed = True
@@ -792,6 +803,7 @@ class TranscriptionService:
             decision = await self.llm.understand_slot_selection(
                 text,
                 self.state.available_slots,
+                history=self.llm_history(),
             )
         except Exception as error:
             await self.send(
@@ -803,6 +815,16 @@ class TranscriptionService:
             return
         finally:
             await self.send({"type": "llm_status", "status": "idle"})
+
+        if decision["tool"] == "provide_tracking_id":
+            await self.provide_saved_tracking_id()
+            return
+
+        if decision["tool"] == "provide_delivery_detail":
+            await self.provide_delivery_detail(
+                decision["arguments"].get("field")
+            )
+            return
 
         if decision["tool"] != "select_delivery_slot":
             message = decision["message"] or (
@@ -827,6 +849,7 @@ class TranscriptionService:
                 text,
                 self.state.selected_slot,
                 self.state.available_slots,
+                history=self.llm_history(),
             )
         except Exception as error:
             await self.send(
@@ -838,6 +861,16 @@ class TranscriptionService:
             return
         finally:
             await self.send({"type": "llm_status", "status": "idle"})
+
+        if decision["tool"] == "provide_tracking_id":
+            await self.provide_saved_tracking_id()
+            return
+
+        if decision["tool"] == "provide_delivery_detail":
+            await self.provide_delivery_detail(
+                decision["arguments"].get("field")
+            )
+            return
 
         if decision["tool"] == "confirm_delivery_slot":
             self.state.slot_confirmed = True
@@ -900,6 +933,74 @@ class TranscriptionService:
         message = decision["message"] or (
             "Please say yes if that slot works, or choose another available slot."
         )
+        await self.send_assistant_message(message)
+
+    async def provide_saved_tracking_id(self) -> None:
+        if self.state.tracking_id:
+            await self.send_assistant_message(
+                "Your tracking ID is "
+                f"{tracking_id_for_speech(self.state.tracking_id)}."
+            )
+            return
+
+        await self.send_assistant_message(
+            "I do not have a tracking ID saved for this conversation."
+        )
+
+    async def provide_delivery_detail(self, field: str | None) -> None:
+        if not self.state.tracking_id:
+            await self.send_assistant_message(
+                "Please provide your tracking ID before I look up delivery details."
+            )
+            return
+
+        try:
+            delivery = await find_delivery(self.state.tracking_id)
+        except Exception:
+            await self.send_assistant_message(
+                "I cannot access the delivery details right now. Please try again."
+            )
+            return
+
+        if delivery is None:
+            await self.send_assistant_message(
+                "I could not find delivery details for the saved tracking ID."
+            )
+            return
+
+        if field == "customer_name":
+            customer_name = delivery.get("customer_name")
+            message = (
+                f"The customer name for this delivery is {customer_name}."
+                if customer_name
+                else "I do not have a customer name saved for this delivery."
+            )
+        elif field == "customer_number":
+            customer_number = delivery.get("customer_number")
+            message = (
+                f"The customer number for this delivery is {customer_number}."
+                if customer_number
+                else "I do not have a customer number saved for this delivery."
+            )
+        elif field == "delivery_status":
+            status = str(delivery.get("status") or "").replace("_", " ")
+            message = (
+                f"The delivery status is {status}."
+                if status
+                else "I do not have a delivery status saved for this delivery."
+            )
+        elif field == "delivery_time":
+            slot = self.state.selected_slot
+            if slot is None:
+                slot = await get_booked_slot(self.state.tracking_id)
+            message = (
+                f"The delivery time is {slot['label']}."
+                if slot
+                else "A delivery time has not been selected yet."
+            )
+        else:
+            message = "I do not have that delivery detail available."
+
         await self.send_assistant_message(message)
 
     def find_offered_slot(self, slot_id: str | None) -> dict | None:
