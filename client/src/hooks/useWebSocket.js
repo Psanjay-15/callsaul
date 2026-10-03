@@ -171,6 +171,14 @@ export function useWebSocket({
             onConversationPaused?.();
           }
 
+          if (payload.type === "conversation_ended") {
+            setSttStatus("disconnected");
+            setTtsStatus("disconnected");
+            setTurnEvent("idle");
+            onConversationPaused?.();
+            onConversationUpdated?.();
+          }
+
           if (payload.type === "llm_response") {
             setMessages((current) => [
               ...current,

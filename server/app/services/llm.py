@@ -22,6 +22,10 @@ AGENT_INSTRUCTIONS = (
 )
 
 GROUNDED_RESPONSE_GOALS = {
+    "conversation_ended": (
+        "Give one warm, brief closing sentence. Do not ask another question or invite "
+        "the caller to continue."
+    ),
     "backend_progress": (
         "Give one brief, natural progress update because the delivery operation is "
         "taking longer than expected. Do not claim that it succeeded or failed."
@@ -157,6 +161,26 @@ def provide_delivery_detail_tool() -> dict:
     }
 
 
+def end_conversation_tool() -> dict:
+    return {
+        "type": "function",
+        "name": "end_conversation",
+        "description": (
+            "End the voice conversation only when the caller clearly asks to end, "
+            "stop, hang up, leave, or says a definite farewell such as 'goodbye' or "
+            "'that's all'. Do not use this for an ordinary no, a rejected slot, or an "
+            "unclear answer."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    }
+
+
 class LLMService:
     def __init__(self) -> None:
         self.client = create_openai_client()
@@ -254,7 +278,8 @@ class LLMService:
                         "additionalProperties": False,
                     },
                     "strict": True,
-                }
+                },
+                end_conversation_tool(),
             ],
         )
 
@@ -330,6 +355,7 @@ class LLMService:
                 },
                 provide_tracking_id_tool(),
                 provide_delivery_detail_tool(),
+                end_conversation_tool(),
             ],
         )
 
@@ -381,6 +407,7 @@ class LLMService:
                 },
                 provide_tracking_id_tool(),
                 provide_delivery_detail_tool(),
+                end_conversation_tool(),
             ],
         )
 
@@ -433,6 +460,7 @@ class LLMService:
                 },
                 provide_tracking_id_tool(),
                 provide_delivery_detail_tool(),
+                end_conversation_tool(),
             ],
         )
 
@@ -461,7 +489,10 @@ class LLMService:
                 f"Tracking ID {tracking_id or 'unknown'} has already been confirmed. "
                 f"The caller is confirming the delivery slot {selected_slot['label']}. "
                 f"{single_slot_instruction}"
-                "Call confirm_delivery_slot only for a clear yes. Call reject_delivery_slot "
+                "Call confirm_delivery_slot only for a clear, unqualified yes. A yes followed "
+                "by words such as 'but', 'before booking', 'wait', 'hold on', or by another "
+                "question or request is not final authorization: answer that request and do "
+                "not call confirm_delivery_slot yet. Call reject_delivery_slot "
                 "for a clear no without another choice. If they choose a different offered "
                 "slot in this current statement, call change_delivery_slot. Never infer a "
                 "slot from an earlier statement. If they only say they want to change, call "
@@ -524,6 +555,7 @@ class LLMService:
                 },
                 provide_tracking_id_tool(),
                 provide_delivery_detail_tool(),
+                end_conversation_tool(),
             ],
         )
 
@@ -558,6 +590,7 @@ class LLMService:
             tools=[
                 provide_tracking_id_tool(),
                 provide_delivery_detail_tool(),
+                end_conversation_tool(),
                 {
                     "type": "function",
                     "name": "start_delivery_reschedule",

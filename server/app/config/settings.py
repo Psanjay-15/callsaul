@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     deepgram_stt_model: str = "flux-general-en"
     deepgram_eot_threshold: float = 0.7
     deepgram_eot_timeout_ms: int = 2000
+    voice_turn_commit_delay_ms: int = 250
+    voice_short_turn_commit_delay_ms: int = 1000
     deepgram_tts_model: str = "flux-alexis-en"
     deepgram_tts_sample_rate: int = 24000
     fake_backend_mode: str = "cycle"

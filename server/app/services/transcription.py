@@ -49,6 +49,9 @@ class TranscriptionService:
         self.user_tasks: set[asyncio.Task] = set()
         self.response_generation = 0
         self.user_is_speaking = False
+        self.conversation_ending = False
+        self.pending_voice_transcript = ""
+        self.pending_voice_commit_task: asyncio.Task | None = None
         self.state = ConversationState()
         self.llm = LLMService()
         self.tts = TTSService(self.send_audio, self.send)
@@ -122,6 +125,7 @@ class TranscriptionService:
             pass
         finally:
             await self.stop_idle_monitor()
+            self.cancel_pending_voice_turn()
             for task in self.user_tasks:
                 task.cancel()
             if self.user_tasks:
@@ -196,6 +200,7 @@ class TranscriptionService:
         elif message_type == "audio_stop":
             await self.stop_idle_monitor()
             await self.handle_barge_in()
+            self.cancel_pending_voice_turn(clear_transcript=True)
             await self.stop_audio()
         elif message_type == "ping":
             await self.send({"type": "pong"})
@@ -295,18 +300,34 @@ class TranscriptionService:
         turn_event = str(message.event)
 
         if turn_event == "StartOfTurn":
+            # Flux may end a turn during a short thinking pause. Keep the text
+            # from that provisional turn and join it to the speech that follows.
+            self.cancel_pending_voice_turn()
             self.mark_user_activity()
             self.user_is_speaking = True
             await self.handle_barge_in()
         elif turn_event == "EndOfTurn":
             self.user_is_speaking = False
 
+        transcript = message.transcript.strip()
+        if turn_event == "EndOfTurn" and transcript:
+            self.pending_voice_transcript = self.merge_voice_transcript(
+                self.pending_voice_transcript,
+                transcript,
+            )
+
         await self.send(
             {
                 "type": "transcript",
                 "event": turn_event,
-                "text": message.transcript,
-                "is_final": turn_event == "EndOfTurn",
+                "text": (
+                    self.pending_voice_transcript
+                    if turn_event == "EndOfTurn"
+                    else message.transcript
+                ),
+                # EndOfTurn is provisional. The transcript becomes final only
+                # after the caller has stayed quiet for the commit delay.
+                "is_final": False,
                 "turn_index": message.turn_index,
             }
         )
@@ -314,11 +335,65 @@ class TranscriptionService:
         if (
             turn_event == "EndOfTurn"
             and self.audio_active
-            and message.transcript.strip()
+            and transcript
         ):
-            task = asyncio.create_task(self.handle_user_input(message.transcript))
+            self.cancel_pending_voice_turn()
+            task = asyncio.create_task(self.commit_pending_voice_turn())
+            self.pending_voice_commit_task = task
             self.user_tasks.add(task)
             task.add_done_callback(self.user_tasks.discard)
+
+    @staticmethod
+    def merge_voice_transcript(current: str, incoming: str) -> str:
+        current = current.strip()
+        incoming = incoming.strip()
+        if not current:
+            return incoming
+        if not incoming or incoming == current:
+            return current
+        if incoming.startswith(current):
+            return incoming
+        return f"{current} {incoming}"
+
+    def cancel_pending_voice_turn(self, *, clear_transcript: bool = False) -> None:
+        task = self.pending_voice_commit_task
+        self.pending_voice_commit_task = None
+        if task is not None and not task.done():
+            task.cancel()
+        if clear_transcript:
+            self.pending_voice_transcript = ""
+
+    async def commit_pending_voice_turn(self) -> None:
+        word_count = len(self.pending_voice_transcript.split())
+        delay_ms = (
+            settings.voice_short_turn_commit_delay_ms
+            if word_count <= 2
+            else settings.voice_turn_commit_delay_ms
+        )
+        try:
+            await asyncio.sleep(delay_ms / 1000)
+        except asyncio.CancelledError:
+            return
+
+        # Clear the cancellable timer before processing. Once processing starts,
+        # a later utterance may interrupt speech but cannot cancel a DB write.
+        if self.pending_voice_commit_task is asyncio.current_task():
+            self.pending_voice_commit_task = None
+
+        transcript = self.pending_voice_transcript.strip()
+        self.pending_voice_transcript = ""
+        if not transcript or not self.audio_active:
+            return
+
+        await self.send(
+            {
+                "type": "transcript",
+                "event": "CommittedTurn",
+                "text": transcript,
+                "is_final": True,
+            }
+        )
+        await self.handle_user_input(transcript)
 
     async def handle_barge_in(self) -> None:
         self.response_generation += 1
@@ -493,9 +568,13 @@ class TranscriptionService:
         if not isinstance(text, str) or not text.strip():
             await self.send({"type": "error", "message": "Message cannot be empty."})
             return
+        if self.conversation_ending:
+            return
 
         self.mark_user_activity()
         async with self.conversation_lock:
+            if self.conversation_ending:
+                return
             await self.record_message("user", text.strip())
             if self.state.stage == ConversationStage.COLLECTING_TRACKING_ID:
                 await self.collect_tracking_id(text.strip())
@@ -511,6 +590,27 @@ class TranscriptionService:
                 await self.handle_completed_conversation(text.strip())
             else:
                 await self.send_to_llm(text.strip())
+
+    async def handle_end_conversation(self, decision: dict) -> bool:
+        if decision.get("tool") != "end_conversation":
+            return False
+        if self.conversation_ending:
+            return True
+
+        self.conversation_ending = True
+        self.start_message = None
+        await self.stop_idle_monitor()
+        try:
+            await self.send_grounded_response(
+                "conversation_ended",
+                facts={"conversation_ended": True},
+            )
+            await self.tts.wait_until_finished()
+        finally:
+            await self.stop_audio()
+            await self.tts.close()
+            await self.send({"type": "conversation_ended"})
+        return True
 
     async def handle_completed_conversation(self, text: str) -> None:
         await self.send({"type": "llm_status", "status": "thinking"})
@@ -531,6 +631,9 @@ class TranscriptionService:
             return
         finally:
             await self.send({"type": "llm_status", "status": "idle"})
+
+        if await self.handle_end_conversation(decision):
+            return
 
         if decision["tool"] == "start_delivery_reschedule":
             await self.start_delivery_reschedule()
@@ -636,6 +739,9 @@ class TranscriptionService:
         finally:
             await self.send({"type": "llm_status", "status": "idle"})
 
+        if await self.handle_end_conversation(decision):
+            return
+
         if decision["tool"] != "capture_tracking_id":
             message = decision["message"] or (
                 "Please say your tracking ID. It has two letters followed by six digits."
@@ -663,6 +769,9 @@ class TranscriptionService:
             return
         finally:
             await self.send({"type": "llm_status", "status": "idle"})
+
+        if await self.handle_end_conversation(decision):
+            return
 
         if decision["tool"] == "provide_tracking_id":
             await self.provide_saved_tracking_id()
@@ -844,6 +953,9 @@ class TranscriptionService:
         finally:
             await self.send({"type": "llm_status", "status": "idle"})
 
+        if await self.handle_end_conversation(decision):
+            return
+
         if decision["tool"] == "provide_tracking_id":
             await self.provide_saved_tracking_id()
             return
@@ -894,6 +1006,9 @@ class TranscriptionService:
         finally:
             await self.send({"type": "llm_status", "status": "idle"})
 
+        if await self.handle_end_conversation(decision):
+            return
+
         if decision["tool"] == "check_available_slots":
             await self.offer_available_slots()
             return
@@ -934,6 +1049,9 @@ class TranscriptionService:
             return
         finally:
             await self.send({"type": "llm_status", "status": "idle"})
+
+        if await self.handle_end_conversation(decision):
+            return
 
         if decision["tool"] == "provide_tracking_id":
             await self.provide_saved_tracking_id()
@@ -1268,6 +1386,8 @@ class TranscriptionService:
         self.last_user_activity_at = now
 
     async def start_idle_monitor(self) -> None:
+        if self.conversation_ending:
+            return
         await self.stop_idle_monitor()
         self.idle_task = asyncio.create_task(self.monitor_inactivity())
 
@@ -1283,12 +1403,19 @@ class TranscriptionService:
     async def monitor_inactivity(self) -> None:
         timeout = settings.conversation_idle_timeout_seconds
 
-        while self.websocket_open and self.audio_active:
+        while (
+            self.websocket_open
+            and self.audio_active
+            and not self.conversation_ending
+        ):
             idle_for = asyncio.get_running_loop().time() - self.last_activity_at
             remaining = timeout - idle_for
             if remaining > 0:
                 await asyncio.sleep(remaining)
                 continue
+
+            if self.conversation_ending:
+                return
 
             previous_user_activity = self.last_user_activity_at
             await self.send_assistant_message(
