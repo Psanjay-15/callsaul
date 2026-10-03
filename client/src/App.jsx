@@ -30,6 +30,10 @@ export default function App() {
   const [historyError, setHistoryError] = useState("");
   const [deletingSessionId, setDeletingSessionId] = useState("");
   const conversationRef = useRef(null);
+  const stopMicrophoneRef = useRef(null);
+  const handleConversationPaused = useCallback(() => {
+    stopMicrophoneRef.current?.();
+  }, []);
   const loadHistory = useCallback(async () => {
     try {
       const response = await fetch(`${API_BASE_URL}/api/history`);
@@ -71,6 +75,7 @@ export default function App() {
   } = useWebSocket({
     onAudio: appendAudio,
     onBargeIn: stopAudio,
+    onConversationPaused: handleConversationPaused,
     onConversationUpdated: loadHistory,
     onTtsStart: setSampleRate,
   });
@@ -80,6 +85,13 @@ export default function App() {
     status: microphoneStatus,
     stop: stopMicrophone,
   } = useMicrophone({ sendAudio, sendControl });
+
+  useEffect(() => {
+    stopMicrophoneRef.current = stopMicrophone;
+    return () => {
+      stopMicrophoneRef.current = null;
+    };
+  }, [stopMicrophone]);
 
   useEffect(() => {
     async function loadPage() {
@@ -97,7 +109,7 @@ export default function App() {
   );
 
   useEffect(() => {
-    if (!isConnected && isRecording) stopMicrophone();
+    if (!isConnected && isRecording) void stopMicrophone();
   }, [isConnected, isRecording, stopMicrophone]);
 
   useEffect(() => {
@@ -115,25 +127,31 @@ export default function App() {
     if (sendMessage(input)) setInput("");
   }
 
-  function stopCurrentChat() {
-    stopMicrophone();
+  async function stopCurrentChat() {
+    await stopMicrophone();
     stopAudio();
-    disconnect();
+    await disconnect();
+  }
+
+  async function stopListening() {
+    stopAudio();
+    await stopMicrophone();
+  }
+
+  async function startListening() {
+    await prepareAudio();
+    await startMicrophone();
   }
 
   async function openChat(targetSessionId) {
-    stopCurrentChat();
-    await prepareAudio();
-    const connected = await connect(targetSessionId);
-    if (connected) await startMicrophone();
+    await stopCurrentChat();
+    await connect(targetSessionId);
   }
 
   async function startNewChat() {
     clearSavedSessionReference();
-    stopCurrentChat();
-    await prepareAudio();
-    const connected = await connect("");
-    if (connected) await startMicrophone();
+    await stopCurrentChat();
+    await connect("");
   }
 
   async function deleteChat(session) {
@@ -145,7 +163,7 @@ export default function App() {
     const isActiveChat = session.session_id === sessionId;
     if (isActiveChat) {
       clearSavedSessionReference();
-      stopCurrentChat();
+      await stopCurrentChat();
     }
 
     setDeletingSessionId(session.session_id);
@@ -315,7 +333,7 @@ export default function App() {
                     isRecording ? "stop-recording-button" : "recording-button"
                   }
                   type="button"
-                  onClick={isRecording ? stopCurrentChat : startMicrophone}
+                  onClick={isRecording ? stopListening : startListening}
                   disabled={microphoneStatus === "requesting_permission"}
                 >
                   {isRecording ? "Listening · Stop" : "Start listening"}

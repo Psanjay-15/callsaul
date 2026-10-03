@@ -12,6 +12,7 @@ export function useAudioPlayer() {
   const nextStartTimeRef = useRef(0);
   const sampleRateRef = useRef(24000);
   const sourcesRef = useRef(new Set());
+  const acceptAudioRef = useRef(true);
 
   const prepare = useCallback(async () => {
     if (!audioContextRef.current) {
@@ -26,6 +27,7 @@ export function useAudioPlayer() {
   }, []);
 
   const setSampleRate = useCallback((sampleRate) => {
+    acceptAudioRef.current = true;
     if (Number.isFinite(sampleRate) && sampleRate > 0) {
       sampleRateRef.current = sampleRate;
     }
@@ -33,7 +35,11 @@ export function useAudioPlayer() {
 
   const appendAudio = useCallback((arrayBuffer) => {
     const audioContext = audioContextRef.current;
-    if (!audioContext || arrayBuffer.byteLength < 2) return;
+    if (
+      !acceptAudioRef.current ||
+      !audioContext ||
+      arrayBuffer.byteLength < 2
+    ) return;
 
     const sampleCount = Math.floor(arrayBuffer.byteLength / 2);
     const pcm = new Int16Array(arrayBuffer, 0, sampleCount);
@@ -68,6 +74,7 @@ export function useAudioPlayer() {
   }, []);
 
   const stop = useCallback(() => {
+    acceptAudioRef.current = false;
     for (const source of sourcesRef.current) {
       try {
         source.stop();

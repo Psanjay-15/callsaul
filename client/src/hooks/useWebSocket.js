@@ -15,6 +15,7 @@ function getWebSocketUrl(sessionId) {
 export function useWebSocket({
   onAudio,
   onBargeIn,
+  onConversationPaused,
   onConversationUpdated,
   onTtsStart,
 } = {}) {
@@ -38,17 +39,32 @@ export function useWebSocket({
   const disconnect = useCallback(() => {
     const socket = socketRef.current;
     socketRef.current = null;
+    let closed = Promise.resolve();
 
     if (socket?.readyState === WebSocket.OPEN) {
+      closed = new Promise((resolve) => {
+        const forceCloseTimer = window.setTimeout(() => {
+          try {
+            socket.close(1000, "Conversation stopped");
+          } catch {
+            // The socket may already be closed.
+          }
+          resolve();
+        }, 1500);
+
+        socket.addEventListener(
+          "close",
+          () => {
+            window.clearTimeout(forceCloseTimer);
+            resolve();
+          },
+          { once: true },
+        );
+      });
       try {
         socket.send(JSON.stringify({ type: "stop" }));
       } catch {
         // The connection may already be closing; stopping is best effort.
-      }
-      try {
-        socket.close(1000, "Conversation stopped");
-      } catch {
-        // The socket may already be closed.
       }
     } else if (socket) {
       try {
@@ -65,6 +81,7 @@ export function useWebSocket({
     setTtsStatus("disconnected");
     setBackendStatus("idle");
     setConversationStage("not_started");
+    return closed;
   }, []);
 
   const connect = useCallback(
@@ -148,6 +165,10 @@ export function useWebSocket({
 
           if (payload.type === "barge_in") {
             onBargeIn?.();
+          }
+
+          if (payload.type === "conversation_paused") {
+            onConversationPaused?.();
           }
 
           if (payload.type === "llm_response") {
@@ -265,7 +286,13 @@ export function useWebSocket({
         };
       });
     },
-    [onAudio, onBargeIn, onConversationUpdated, onTtsStart],
+    [
+      onAudio,
+      onBargeIn,
+      onConversationPaused,
+      onConversationUpdated,
+      onTtsStart,
+    ],
   );
 
   const sendMessage = useCallback((text) => {
@@ -297,7 +324,9 @@ export function useWebSocket({
     return true;
   }, []);
 
-  useEffect(() => disconnect, [disconnect]);
+  useEffect(() => () => {
+    void disconnect();
+  }, [disconnect]);
 
   return {
     audioStats,

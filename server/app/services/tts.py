@@ -20,26 +20,30 @@ class TTSService:
         self.connection_context = None
         self.connection = None
         self.listener_task: asyncio.Task | None = None
+        self.connect_lock = asyncio.Lock()
         self.active_turn = False
         self.discard_audio = False
         self.turn_finished = asyncio.Event()
         self.turn_finished.set()
 
     async def connect(self) -> None:
-        if self.connection is not None:
-            return
+        async with self.connect_lock:
+            if self.connection is not None:
+                return
 
-        client = create_deepgram_client()
-        self.connection_context = client.speak.v2.connect(
-            model=settings.deepgram_tts_model,
-            encoding="linear16",
-            sample_rate=settings.deepgram_tts_sample_rate,
-        )
-        self.connection = await self.connection_context.__aenter__()
-        self.connection.on(EventType.MESSAGE, self.handle_message)
-        self.connection.on(EventType.ERROR, self.handle_error)
-        self.listener_task = asyncio.create_task(self.connection.start_listening())
-        await self.on_event({"type": "tts_status", "status": "connected"})
+            client = create_deepgram_client()
+            self.connection_context = client.speak.v2.connect(
+                model=settings.deepgram_tts_model,
+                encoding="linear16",
+                sample_rate=settings.deepgram_tts_sample_rate,
+            )
+            self.connection = await self.connection_context.__aenter__()
+            self.connection.on(EventType.MESSAGE, self.handle_message)
+            self.connection.on(EventType.ERROR, self.handle_error)
+            self.listener_task = asyncio.create_task(
+                self.connection.start_listening()
+            )
+            await self.on_event({"type": "tts_status", "status": "connected"})
 
     def begin_turn(self) -> None:
         self.active_turn = True
@@ -88,6 +92,10 @@ class TTSService:
                 listener_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await listener_task
+            except Exception:
+                # A provider WebSocket can fail its keepalive while it is closing.
+                # The connection is being discarded, so cleanup should continue.
+                pass
 
         if connection_context is not None:
             with suppress(Exception):

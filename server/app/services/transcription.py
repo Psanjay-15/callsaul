@@ -56,6 +56,7 @@ class TranscriptionService:
         self.connection = None
         self.listener_task: asyncio.Task | None = None
         self.idle_task: asyncio.Task | None = None
+        self.start_message: str | None = None
         self.last_activity_at = 0.0
         self.last_user_activity_at = 0.0
         self.websocket_open = True
@@ -75,7 +76,15 @@ class TranscriptionService:
             )
             await self.websocket.close(code=4404)
             return
-        resume_message = self.get_resume_message() if resumed else None
+        self.start_message = (
+            "I am listening. What would you like to do with this delivery?"
+            if resumed
+            else (
+                "Hello, I am Saul, CallSaul's delivery assistant. I can help "
+                "reschedule your delivery. Please say your tracking ID. It has two "
+                "letters followed by six digits."
+            )
+        )
         await self.send(
             {
                 "type": "session",
@@ -93,17 +102,6 @@ class TranscriptionService:
                 }
             )
         await self.send_conversation_state(persist=resumed)
-
-        if resumed:
-            await self.send_assistant_message(resume_message)
-        else:
-            await self.send_assistant_message(
-                "Hello. I can help reschedule your delivery. "
-                "Please say your tracking ID. It has two letters followed by six digits."
-            )
-
-        self.mark_activity()
-        self.idle_task = asyncio.create_task(self.monitor_inactivity())
 
         try:
             while True:
@@ -123,10 +121,7 @@ class TranscriptionService:
         except WebSocketDisconnect:
             pass
         finally:
-            if self.idle_task is not None:
-                self.idle_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await self.idle_task
+            await self.stop_idle_monitor()
             for task in self.user_tasks:
                 task.cancel()
             if self.user_tasks:
@@ -163,63 +158,12 @@ class TranscriptionService:
                 self.state.slot_confirmed = True
                 await save_conversation_state(self.session_id, self.state)
 
-        return True
-
-    def get_resume_message(self) -> str:
-        if self.state.stage == ConversationStage.CONFIRMING_TRACKING_ID:
-            if not self.state.tracking_id:
-                self.state.stage = ConversationStage.COLLECTING_TRACKING_ID
-                return "Welcome back. Please say your complete tracking ID again."
-            return (
-                "Welcome back. I still have tracking ID "
-                f"{tracking_id_for_speech(self.state.tracking_id)}. Is that correct?"
-            )
-        if self.state.stage == ConversationStage.OFFERING_SLOTS:
-            if self.state.available_slots:
-                if len(self.state.available_slots) == 1:
-                    slot = self.state.available_slots[0]
-                    self.state.selected_slot = slot
-                    self.state.booking_idempotency_key = str(uuid4())
-                    self.state.stage = ConversationStage.CONFIRMING_SLOT
-                    return (
-                        "Welcome back. The only available delivery slot is "
-                        f"{slot['label']}. Will that work for you?"
-                    )
-                options = " ".join(
-                    f"{index}. {slot['label']}."
-                    for index, slot in enumerate(
-                        self.state.available_slots,
-                        start=1,
-                    )
-                )
-                return f"Welcome back. The available slots were: {options}"
-            return "Welcome back. I can continue checking delivery slots for you."
-        if self.state.stage == ConversationStage.CONFIRMING_SLOT:
-            if not self.state.selected_slot:
-                self.state.stage = ConversationStage.OFFERING_SLOTS
-                return "Welcome back. Please choose an available delivery slot."
-            return (
-                "Welcome back. You selected "
-                f"{self.state.selected_slot['label']}. Will that work for you?"
-            )
         if self.state.stage == ConversationStage.BOOKING:
             self.state.stage = ConversationStage.CONFIRMING_SLOT
             self.state.slot_confirmed = False
-            return (
-                "Welcome back. I saved your selected slot, but the booking was "
-                "interrupted. Please confirm if you want me to try booking it again."
-            )
-        if self.state.stage == ConversationStage.COMPLETED:
-            if not self.state.selected_slot:
-                return "Welcome back. How can I help with your delivery?"
-            return (
-                "Welcome back. Your delivery is scheduled for "
-                f"{self.state.selected_slot['label']}. How can I help?"
-            )
-        return (
-            "Welcome back. Please say your tracking ID. "
-            "It has two letters followed by six digits."
-        )
+            await save_conversation_state(self.session_id, self.state)
+
+        return True
 
     async def handle_control(self, raw_message: str) -> bool:
         try:
@@ -233,14 +177,40 @@ class TranscriptionService:
         message_type = message.get("type")
 
         if message_type == "audio_start":
+            # Establish listening first. Opening STT and TTS handshakes at exactly
+            # the same time can make one of the provider connections time out.
             await self.start_deepgram_stream(message.get("mime_type", "unknown"))
+            if self.connection is None:
+                return False
+            self.mark_activity()
+            await self.start_idle_monitor()
+
+            if self.start_message:
+                message_to_send = self.start_message
+                self.start_message = None
+                greeting_task = asyncio.create_task(
+                    self.send_assistant_message(message_to_send)
+                )
+                self.user_tasks.add(greeting_task)
+                greeting_task.add_done_callback(self.user_tasks.discard)
         elif message_type == "audio_stop":
+            await self.stop_idle_monitor()
+            await self.handle_barge_in()
             await self.stop_audio()
         elif message_type == "ping":
             await self.send({"type": "pong"})
         elif message_type == "message":
+            self.start_message = None
             await self.handle_user_input(message.get("text"))
         elif message_type == "stop":
+            await self.stop_idle_monitor()
+            await self.handle_barge_in()
+            for task in list(self.user_tasks):
+                task.cancel()
+            if self.user_tasks:
+                await asyncio.gather(*self.user_tasks, return_exceptions=True)
+            await self.stop_audio()
+            await self.tts.close()
             self.websocket_open = False
             await self.websocket.close(code=1000)
             return True
@@ -275,6 +245,7 @@ class TranscriptionService:
             await self.send({"type": "stt_status", "status": "connected"})
             await self.send({"type": "audio_started", "mime_type": mime_type})
         except Exception as error:
+            self.audio_active = False
             await self.send(
                 {
                     "type": "stt_error",
@@ -340,7 +311,11 @@ class TranscriptionService:
             }
         )
 
-        if turn_event == "EndOfTurn" and message.transcript.strip():
+        if (
+            turn_event == "EndOfTurn"
+            and self.audio_active
+            and message.transcript.strip()
+        ):
             task = asyncio.create_task(self.handle_user_input(message.transcript))
             self.user_tasks.add(task)
             task.add_done_callback(self.user_tasks.discard)
@@ -399,6 +374,10 @@ class TranscriptionService:
                 listener_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await listener_task
+            except Exception:
+                # A provider WebSocket can fail its keepalive while it is closing.
+                # The stream is already unusable, so cleanup should continue.
+                pass
 
         if connection_context is not None:
             with suppress(Exception):
@@ -408,6 +387,25 @@ class TranscriptionService:
         if not isinstance(text, str) or not text.strip():
             await self.send({"type": "error", "message": "Message cannot be empty."})
             return
+
+        await self.stream_llm_response(
+            self.llm.stream_response(self.llm_history())
+        )
+
+    async def send_grounded_response(
+        self,
+        response_type: str,
+        facts: dict,
+    ) -> None:
+        await self.stream_llm_response(
+            self.llm.stream_grounded_response(
+                self.llm_history(),
+                facts,
+                response_type,
+            )
+        )
+
+    async def stream_llm_response(self, response_stream) -> None:
 
         await self.send({"type": "llm_status", "status": "streaming"})
         await self.send({"type": "llm_start"})
@@ -436,7 +434,7 @@ class TranscriptionService:
         full_response = ""
         interrupted = False
         try:
-            async for delta in self.llm.stream_response(self.llm_history()):
+            async for delta in response_stream:
                 if response_generation != self.response_generation:
                     interrupted = True
                     break
@@ -505,6 +503,8 @@ class TranscriptionService:
                 await self.confirm_tracking_id(text.strip())
             elif self.state.stage == ConversationStage.OFFERING_SLOTS:
                 await self.select_slot(text.strip())
+            elif self.state.stage == ConversationStage.NO_SLOTS:
+                await self.handle_no_slots_follow_up(text.strip())
             elif self.state.stage == ConversationStage.CONFIRMING_SLOT:
                 await self.confirm_slot(text.strip())
             elif self.state.stage == ConversationStage.COMPLETED:
@@ -556,30 +556,34 @@ class TranscriptionService:
         slot_task = asyncio.create_task(
             self.run_backend_operation(
                 get_available_slots(),
-                progress_messages=[
-                    "I am still checking the available slots. "
-                    "This is taking a little longer than usual.",
-                    "The delivery system is still responding. Thank you for waiting.",
-                ],
+                operation_name="check_available_slots",
             )
-        )
-        await self.send_assistant_message(
-            "I will check the available slots so we can change your delivery time."
         )
 
         try:
             slots = await slot_task
         except Exception:
-            await self.send_assistant_message(
-                "I cannot check the available delivery slots right now. "
-                "Your current booking has not changed. Please try again."
+            await self.send_grounded_response(
+                "reschedule_lookup_failed",
+                facts={
+                    "operation": "check_available_slots",
+                    "status": "failed",
+                    "current_booking": self.state.selected_slot,
+                    "delivery_changed": False,
+                },
             )
             return
 
         if not slots:
-            await self.send_assistant_message(
-                "There are no other delivery slots available right now. "
-                "Your current booking has not changed."
+            await self.send_grounded_response(
+                "no_alternative_slots",
+                facts={
+                    "operation": "check_available_slots",
+                    "status": "success",
+                    "available_slots": [],
+                    "current_booking": self.state.selected_slot,
+                    "delivery_changed": False,
+                },
             )
             return
 
@@ -588,27 +592,32 @@ class TranscriptionService:
         self.state.booking_idempotency_key = None
 
         if len(slots) == 1:
-            slot = slots[0]
-            await self.ask_to_confirm_slot(
-                slot,
-                "I found one available delivery slot: "
-                f"{slot['label']}. Will that work for you?",
-            )
+            await self.ask_to_confirm_slot(slots[0])
             return
 
         self.state.stage = ConversationStage.OFFERING_SLOTS
         await self.send_conversation_state()
 
-        position_names = ["First", "Second", "Third"]
-        options = " ".join(
-            f"{position_names[index]}, {slot['label']}."
-            for index, slot in enumerate(slots)
-        )
-        await self.send_assistant_message(
-            f"I found these delivery slots. {options} Which one works best for you?"
+        await self.send_grounded_response(
+            "alternative_slot_options",
+            facts={
+                "operation": "check_available_slots",
+                "status": "success",
+                "available_slots": [
+                    {"slot_id": slot["slot_id"], "label": slot["label"]}
+                    for slot in slots
+                ],
+                "current_booking": self.state.selected_slot,
+                "delivery_changed": False,
+            },
         )
 
     async def collect_tracking_id(self, text: str) -> None:
+        direct_candidate = normalize_tracking_id(text)
+        if is_valid_tracking_id(direct_candidate):
+            await self.check_tracking_id(direct_candidate)
+            return
+
         await self.send({"type": "llm_status", "status": "thinking"})
         try:
             decision = await self.llm.understand_tracking_id(
@@ -711,8 +720,13 @@ class TranscriptionService:
         try:
             delivery = await find_delivery(tracking_id)
         except Exception:
-            await self.send_assistant_message(
-                "I cannot access the delivery system right now. Please try again."
+            await self.send_grounded_response(
+                "tracking_lookup_failed",
+                facts={
+                    "operation": "find_delivery",
+                    "status": "failed",
+                    "tracking_id": tracking_id,
+                },
             )
             return
 
@@ -721,9 +735,15 @@ class TranscriptionService:
             self.state.tracking_id_confirmed = False
             self.state.stage = ConversationStage.COLLECTING_TRACKING_ID
             await self.send_conversation_state()
-            await self.send_assistant_message(
-                f"I could not find tracking ID {tracking_id_for_speech(tracking_id)}. "
-                "Please check it and say it again."
+            await self.send_grounded_response(
+                "tracking_not_found",
+                facts={
+                    "operation": "find_delivery",
+                    "status": "success",
+                    "delivery_found": False,
+                    "tracking_id": tracking_id,
+                    "tracking_id_for_speech": tracking_id_for_speech(tracking_id),
+                },
             )
             return
 
@@ -731,32 +751,35 @@ class TranscriptionService:
         self.state.tracking_id_confirmed = False
         self.state.stage = ConversationStage.CONFIRMING_TRACKING_ID
         await self.send_conversation_state()
-        await self.send_assistant_message(
-            f"I found tracking ID {tracking_id_for_speech(tracking_id)}. "
-            "Is that correct?"
+        await self.send_grounded_response(
+            "tracking_found",
+            facts={
+                "operation": "find_delivery",
+                "status": "success",
+                "delivery_found": True,
+                "tracking_id": tracking_id,
+                "tracking_id_for_speech": tracking_id_for_speech(tracking_id),
+            },
         )
 
     async def offer_available_slots(self) -> None:
         slot_task = asyncio.create_task(
             self.run_backend_operation(
                 get_available_slots(),
-                progress_messages=[
-                    "I am still checking the available slots. "
-                    "This is taking a little longer than usual.",
-                    "The delivery system is still responding. Thank you for waiting.",
-                ],
+                operation_name="check_available_slots",
             )
-        )
-        await self.send_assistant_message(
-            "Your tracking ID is confirmed. I am checking the available slots now."
         )
 
         try:
             slots = await slot_task
         except Exception:
-            await self.send_assistant_message(
-                "I cannot check the available delivery slots right now. "
-                "Please try again."
+            await self.send_grounded_response(
+                "slot_lookup_failed",
+                facts={
+                    "operation": "check_available_slots",
+                    "status": "failed",
+                    "delivery_changed": False,
+                },
             )
             return
 
@@ -765,37 +788,42 @@ class TranscriptionService:
         self.state.slot_confirmed = False
 
         if not slots:
-            self.state.stage = ConversationStage.OFFERING_SLOTS
+            self.state.stage = ConversationStage.NO_SLOTS
             await self.send_conversation_state()
-            await self.send_assistant_message(
-                "I am sorry, but there are no delivery slots available right now."
+            await self.send_grounded_response(
+                "no_slots",
+                facts={
+                    "operation": "check_available_slots",
+                    "status": "success",
+                    "available_slots": [],
+                    "delivery_changed": False,
+                },
             )
             return
 
         if len(slots) == 1:
-            slot = slots[0]
-            await self.ask_to_confirm_slot(
-                slot,
-                "I found one available delivery slot: "
-                f"{slot['label']}. Will that work for you?",
-            )
+            await self.ask_to_confirm_slot(slots[0])
             return
 
         self.state.stage = ConversationStage.OFFERING_SLOTS
         await self.send_conversation_state()
 
-        position_names = ["First", "Second", "Third"]
-        options = " ".join(
-            f"{position_names[index]}, {slot['label']}."
-            for index, slot in enumerate(slots)
-        )
-        await self.send_assistant_message(
-            f"I found these delivery slots. {options} Which one works best for you?"
+        await self.send_grounded_response(
+            "slot_options",
+            facts={
+                "operation": "check_available_slots",
+                "status": "success",
+                "available_slots": [
+                    {"slot_id": slot["slot_id"], "label": slot["label"]}
+                    for slot in slots
+                ],
+                "delivery_changed": False,
+            },
         )
 
     async def select_slot(self, text: str) -> None:
         if not self.state.available_slots:
-            await self.offer_available_slots()
+            await self.handle_no_slots_follow_up(text)
             return
 
         await self.send({"type": "llm_status", "status": "thinking"})
@@ -842,6 +870,50 @@ class TranscriptionService:
 
         await self.ask_to_confirm_slot(slot)
 
+    async def handle_no_slots_follow_up(self, text: str) -> None:
+        if self.state.stage != ConversationStage.NO_SLOTS:
+            self.state.stage = ConversationStage.NO_SLOTS
+            await self.send_conversation_state()
+
+        await self.send({"type": "llm_status", "status": "thinking"})
+        try:
+            decision = await self.llm.understand_no_slots_follow_up(
+                text,
+                self.state.tracking_id,
+                self.state.selected_slot,
+                history=self.llm_history(),
+            )
+        except Exception as error:
+            await self.send(
+                {
+                    "type": "llm_error",
+                    "message": f"Could not understand the request: {error}",
+                }
+            )
+            return
+        finally:
+            await self.send({"type": "llm_status", "status": "idle"})
+
+        if decision["tool"] == "check_available_slots":
+            await self.offer_available_slots()
+            return
+
+        if decision["tool"] == "provide_tracking_id":
+            await self.provide_saved_tracking_id()
+            return
+
+        if decision["tool"] == "provide_delivery_detail":
+            await self.provide_delivery_detail(
+                decision["arguments"].get("field")
+            )
+            return
+
+        message = decision["message"] or (
+            "There are no available slots right now, so I have not changed your "
+            "delivery. I can check again if you would like, or you can try later."
+        )
+        await self.send_assistant_message(message)
+
     async def confirm_slot(self, text: str) -> None:
         await self.send({"type": "llm_status", "status": "thinking"})
         try:
@@ -849,6 +921,7 @@ class TranscriptionService:
                 text,
                 self.state.selected_slot,
                 self.state.available_slots,
+                tracking_id=self.state.tracking_id,
                 history=self.llm_history(),
             )
         except Exception as error:
@@ -876,9 +949,6 @@ class TranscriptionService:
             self.state.slot_confirmed = True
             self.state.stage = ConversationStage.BOOKING
             await self.send_conversation_state()
-            await self.send_assistant_message(
-                f"Thank you. I will book {self.state.selected_slot['label']} now."
-            )
             await self.book_selected_slot()
             return
 
@@ -901,17 +971,15 @@ class TranscriptionService:
                 self.state.booking_idempotency_key = None
                 self.state.stage = ConversationStage.COMPLETED
                 await self.send_conversation_state()
-                if booked_slot:
-                    await self.send_assistant_message(
-                        "No problem. I have not changed your delivery. There are no "
-                        "other available slots right now. Your delivery remains "
-                        f"scheduled for {booked_slot['label']}."
-                    )
-                else:
-                    await self.send_assistant_message(
-                        "No problem. I have not booked that slot, and there are no "
-                        "other available slots right now. You can try again later."
-                    )
+                await self.send_grounded_response(
+                    "slot_rejected_no_alternatives",
+                    facts={
+                        "selected_slot_rejected": True,
+                        "available_alternative_slots": [],
+                        "current_booking": booked_slot,
+                        "delivery_changed": False,
+                    },
+                )
                 return
 
             self.state.selected_slot = None
@@ -919,14 +987,16 @@ class TranscriptionService:
             self.state.booking_idempotency_key = None
             self.state.stage = ConversationStage.OFFERING_SLOTS
             await self.send_conversation_state()
-            position_names = ["First", "Second", "Third"]
-            options = " ".join(
-                f"{position_names[index]}, {slot['label']}."
-                for index, slot in enumerate(self.state.available_slots)
-            )
-            await self.send_assistant_message(
-                f"No problem. The available slots are: {options} "
-                "Which one works best for you?"
+            await self.send_grounded_response(
+                "slot_rejected_with_alternatives",
+                facts={
+                    "selected_slot_rejected": True,
+                    "available_slots": [
+                        {"slot_id": slot["slot_id"], "label": slot["label"]}
+                        for slot in self.state.available_slots
+                    ],
+                    "delivery_changed": False,
+                },
             )
             return
 
@@ -937,71 +1007,76 @@ class TranscriptionService:
 
     async def provide_saved_tracking_id(self) -> None:
         if self.state.tracking_id:
-            await self.send_assistant_message(
-                "Your tracking ID is "
-                f"{tracking_id_for_speech(self.state.tracking_id)}."
+            await self.send_grounded_response(
+                "saved_tracking_id",
+                facts={
+                    "tracking_id": self.state.tracking_id,
+                    "tracking_id_for_speech": tracking_id_for_speech(
+                        self.state.tracking_id
+                    ),
+                },
             )
             return
 
-        await self.send_assistant_message(
-            "I do not have a tracking ID saved for this conversation."
+        await self.send_grounded_response(
+            "missing_tracking_id",
+            facts={"tracking_id": None},
         )
 
     async def provide_delivery_detail(self, field: str | None) -> None:
         if not self.state.tracking_id:
-            await self.send_assistant_message(
-                "Please provide your tracking ID before I look up delivery details."
+            await self.send_grounded_response(
+                "tracking_required",
+                facts={"tracking_id": None, "delivery_details_available": False},
             )
             return
 
         try:
             delivery = await find_delivery(self.state.tracking_id)
         except Exception:
-            await self.send_assistant_message(
-                "I cannot access the delivery details right now. Please try again."
+            await self.send_grounded_response(
+                "delivery_lookup_failed",
+                facts={
+                    "operation": "find_delivery",
+                    "status": "failed",
+                    "tracking_id": self.state.tracking_id,
+                },
             )
             return
 
         if delivery is None:
-            await self.send_assistant_message(
-                "I could not find delivery details for the saved tracking ID."
+            await self.send_grounded_response(
+                "delivery_not_found",
+                facts={
+                    "operation": "find_delivery",
+                    "status": "success",
+                    "delivery_found": False,
+                    "tracking_id": self.state.tracking_id,
+                },
             )
             return
 
-        if field == "customer_name":
-            customer_name = delivery.get("customer_name")
-            message = (
-                f"The customer name for this delivery is {customer_name}."
-                if customer_name
-                else "I do not have a customer name saved for this delivery."
-            )
-        elif field == "customer_number":
-            customer_number = delivery.get("customer_number")
-            message = (
-                f"The customer number for this delivery is {customer_number}."
-                if customer_number
-                else "I do not have a customer number saved for this delivery."
-            )
-        elif field == "delivery_status":
-            status = str(delivery.get("status") or "").replace("_", " ")
-            message = (
-                f"The delivery status is {status}."
-                if status
-                else "I do not have a delivery status saved for this delivery."
-            )
-        elif field == "delivery_time":
-            slot = self.state.selected_slot
-            if slot is None:
-                slot = await get_booked_slot(self.state.tracking_id)
-            message = (
-                f"The delivery time is {slot['label']}."
-                if slot
-                else "A delivery time has not been selected yet."
-            )
-        else:
-            message = "I do not have that delivery detail available."
+        slot = self.state.selected_slot
+        if field in {"delivery_time", "summary"} and slot is None:
+            slot = await get_booked_slot(self.state.tracking_id)
 
-        await self.send_assistant_message(message)
+        await self.send_grounded_response(
+            "delivery_detail",
+            facts={
+                "requested_field": field,
+                "tracking_id": self.state.tracking_id,
+                "tracking_id_for_speech": tracking_id_for_speech(
+                    self.state.tracking_id
+                ),
+                "customer_name": delivery.get("customer_name"),
+                "customer_number": delivery.get("customer_number"),
+                "delivery_status": str(delivery.get("status") or "").replace(
+                    "_", " "
+                ),
+                "delivery_slot": slot,
+                "slot_confirmed": self.state.slot_confirmed,
+            },
+        )
 
     def find_offered_slot(self, slot_id: str | None) -> dict | None:
         return next(
@@ -1016,7 +1091,6 @@ class TranscriptionService:
     async def ask_to_confirm_slot(
         self,
         slot: dict,
-        message: str | None = None,
     ) -> None:
         current_slot_id = (
             self.state.selected_slot.get("slot_id")
@@ -1030,8 +1104,16 @@ class TranscriptionService:
         self.state.slot_confirmed = False
         self.state.stage = ConversationStage.CONFIRMING_SLOT
         await self.send_conversation_state()
-        await self.send_assistant_message(
-            message or f"You selected {slot['label']}. Will that work for you?"
+        await self.send_grounded_response(
+            "confirm_selected_slot",
+            facts={
+                "selected_slot": {
+                    "slot_id": slot["slot_id"],
+                    "label": slot["label"],
+                },
+                "slot_confirmed": False,
+                "delivery_changed": False,
+            },
         )
 
     async def book_selected_slot(self) -> None:
@@ -1042,19 +1124,20 @@ class TranscriptionService:
                     slot_id=self.state.selected_slot["slot_id"],
                     idempotency_key=self.state.booking_idempotency_key,
                 ),
-                progress_messages=[
-                    "I am still booking your delivery slot. "
-                    "This is taking a little longer than usual.",
-                    "The booking system is still responding. Thank you for waiting.",
-                ],
+                operation_name="book_delivery_slot",
             )
         except Exception:
             self.state.stage = ConversationStage.CONFIRMING_SLOT
             self.state.slot_confirmed = False
             await self.send_conversation_state()
-            await self.send_assistant_message(
-                "I could not complete the booking. Your selected slot is saved. "
-                "Would you like me to try again?"
+            await self.send_grounded_response(
+                "booking_failed",
+                facts={
+                    "operation": "book_delivery_slot",
+                    "status": "failed",
+                    "selected_slot": self.state.selected_slot,
+                    "delivery_changed": False,
+                },
             )
             return
 
@@ -1065,9 +1148,6 @@ class TranscriptionService:
             self.state.booking_idempotency_key = None
             self.state.stage = ConversationStage.OFFERING_SLOTS
             await self.send_conversation_state()
-            await self.send_assistant_message(
-                "That slot was just taken. I will check the available slots again."
-            )
             await self.offer_available_slots()
             return
 
@@ -1077,8 +1157,14 @@ class TranscriptionService:
             self.state.slot_confirmed = True
             self.state.stage = ConversationStage.COMPLETED
             await self.send_conversation_state()
-            await self.send_assistant_message(
-                f"This delivery is already scheduled for {booked_slot['label']}."
+            await self.send_grounded_response(
+                "already_booked",
+                facts={
+                    "operation": "book_delivery_slot",
+                    "status": "already_booked",
+                    "booked_slot": booked_slot,
+                    "delivery_changed": False,
+                },
             )
             return
 
@@ -1086,21 +1172,26 @@ class TranscriptionService:
         self.state.slot_confirmed = True
         self.state.stage = ConversationStage.COMPLETED
         await self.send_conversation_state()
-        await self.send_assistant_message(
-            f"Done. Your delivery has been rescheduled to "
-            f"{self.state.selected_slot['label']}."
+        await self.send_grounded_response(
+            "booking_succeeded",
+            facts={
+                "operation": "book_delivery_slot",
+                "status": "booked",
+                "booked_slot": self.state.selected_slot,
+                "delivery_changed": True,
+            },
         )
 
     async def run_backend_operation(
         self,
         operation,
-        progress_messages: list[str],
+        operation_name: str,
     ):
         task = asyncio.create_task(operation)
         await self.send({"type": "backend_status", "status": "working"})
 
         try:
-            for message in progress_messages:
+            for update_number in range(1, 3):
                 try:
                     return await asyncio.wait_for(
                         asyncio.shield(task),
@@ -1108,7 +1199,14 @@ class TranscriptionService:
                     )
                 except TimeoutError:
                     await self.send({"type": "backend_status", "status": "slow"})
-                    await self.send_assistant_message(message)
+                    await self.send_grounded_response(
+                        "backend_progress",
+                        facts={
+                            "operation": operation_name,
+                            "status": "still_working",
+                            "progress_update": update_number,
+                        },
+                    )
 
             try:
                 return await asyncio.wait_for(
@@ -1126,15 +1224,22 @@ class TranscriptionService:
     async def send_assistant_message(self, message: str) -> None:
         await self.send({"type": "llm_start"})
         await self.send({"type": "llm_delta", "delta": message})
+        tts_connect_task = None
+        if not self.user_is_speaking:
+            tts_connect_task = asyncio.create_task(self.tts.connect())
+
         await self.record_message("assistant", message)
         await self.send({"type": "llm_done", "message": message})
 
         if self.user_is_speaking:
+            if tts_connect_task is not None:
+                await asyncio.gather(tts_connect_task, return_exceptions=True)
             await self.send({"type": "tts_status", "status": "interrupted"})
             return
 
         try:
-            await self.tts.connect()
+            if tts_connect_task is not None:
+                await tts_connect_task
             self.tts.begin_turn()
             await self.send(
                 {
@@ -1162,10 +1267,23 @@ class TranscriptionService:
         self.last_activity_at = now
         self.last_user_activity_at = now
 
+    async def start_idle_monitor(self) -> None:
+        await self.stop_idle_monitor()
+        self.idle_task = asyncio.create_task(self.monitor_inactivity())
+
+    async def stop_idle_monitor(self) -> None:
+        task = self.idle_task
+        self.idle_task = None
+        if task is None or task is asyncio.current_task():
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
     async def monitor_inactivity(self) -> None:
         timeout = settings.conversation_idle_timeout_seconds
 
-        while self.websocket_open:
+        while self.websocket_open and self.audio_active:
             idle_for = asyncio.get_running_loop().time() - self.last_activity_at
             remaining = timeout - idle_for
             if remaining > 0:
@@ -1174,15 +1292,14 @@ class TranscriptionService:
 
             previous_user_activity = self.last_user_activity_at
             await self.send_assistant_message(
-                "I have not heard anything for a while, so I will end this conversation now."
+                "I have not heard anything for a while, so I will pause listening. "
+                "Press Start listening whenever you are ready."
             )
             await self.tts.wait_until_finished()
             if self.last_user_activity_at > previous_user_activity:
                 continue
 
-            self.websocket_open = False
-            with suppress(RuntimeError):
-                await self.websocket.close(code=1000, reason="Idle timeout")
+            await self.send({"type": "conversation_paused"})
             return
 
     async def send(self, payload: dict) -> None:

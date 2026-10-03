@@ -6,6 +6,7 @@ class ConversationStage:
     COLLECTING_TRACKING_ID = "collecting_tracking_id"
     CONFIRMING_TRACKING_ID = "confirming_tracking_id"
     OFFERING_SLOTS = "offering_slots"
+    NO_SLOTS = "no_slots"
     CONFIRMING_SLOT = "confirming_slot"
     BOOKING = "booking"
     COMPLETED = "completed"

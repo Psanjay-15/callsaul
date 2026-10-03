@@ -18,19 +18,38 @@ export function useMicrophone({ sendAudio, sendControl }) {
   const [error, setError] = useState("");
   const recorderRef = useRef(null);
   const streamRef = useRef(null);
+  const stopPromiseRef = useRef(null);
+  const stopResolverRef = useRef(null);
+  const recordingGenerationRef = useRef(0);
+
   const stop = useCallback(() => {
     const recorder = recorderRef.current;
     const stream = streamRef.current;
 
     if (recorder && recorder.state !== "inactive") {
-      recorder.stop();
-      return;
+      if (stopPromiseRef.current) return stopPromiseRef.current;
+
+      recordingGenerationRef.current += 1;
+      setStatus("stopped");
+      stopPromiseRef.current = new Promise((resolve) => {
+        stopResolverRef.current = resolve;
+      });
+      try {
+        recorder.stop();
+      } catch {
+        stopResolverRef.current?.();
+        stopResolverRef.current = null;
+        stopPromiseRef.current = null;
+      }
+      return stopPromiseRef.current || Promise.resolve();
     }
 
+    recordingGenerationRef.current += 1;
     recorderRef.current = null;
     streamRef.current = null;
     stream?.getTracks().forEach((track) => track.stop());
     setStatus("stopped");
+    return Promise.resolve();
   }, []);
 
   const start = useCallback(async () => {
@@ -59,9 +78,15 @@ export function useMicrophone({ sendAudio, sendControl }) {
 
       streamRef.current = stream;
       recorderRef.current = recorder;
+      const recordingGeneration = recordingGenerationRef.current + 1;
+      recordingGenerationRef.current = recordingGeneration;
 
       recorder.ondataavailable = async (event) => {
-        if (event.data.size > 0) sendAudio(await event.data.arrayBuffer());
+        if (event.data.size === 0) return;
+        const audio = await event.data.arrayBuffer();
+        if (recordingGenerationRef.current === recordingGeneration) {
+          sendAudio(audio);
+        }
       };
 
       recorder.onstop = () => {
@@ -70,11 +95,14 @@ export function useMicrophone({ sendAudio, sendControl }) {
         streamRef.current = null;
         sendControl("audio_stop");
         setStatus("stopped");
+        stopResolverRef.current?.();
+        stopResolverRef.current = null;
+        stopPromiseRef.current = null;
       };
 
       recorder.onerror = () => {
         setError("The browser could not record microphone audio.");
-        stop();
+        void stop();
       };
 
       sendControl("audio_start", { mime_type: recorder.mimeType || "unknown" });
@@ -86,7 +114,9 @@ export function useMicrophone({ sendAudio, sendControl }) {
     }
   }, [sendAudio, sendControl, stop]);
 
-  useEffect(() => stop, [stop]);
+  useEffect(() => () => {
+    void stop();
+  }, [stop]);
 
   return { error, start, status, stop };
 }
