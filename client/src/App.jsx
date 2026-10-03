@@ -49,19 +49,13 @@ export default function App() {
     appendAudio,
     prepare: prepareAudio,
     setSampleRate,
-    status: playbackStatus,
     stop: stopAudio,
   } = useAudioPlayer();
   const {
-    audioStats,
-    backendStatus,
     connect,
-    conversationStage,
     disconnect,
-    error: websocketError,
     finalTranscripts,
     liveTranscript,
-    llmStatus,
     messages,
     sendAudio,
     sendControl,
@@ -69,9 +63,6 @@ export default function App() {
     sessionId,
     sessionResumed,
     status,
-    sttStatus,
-    ttsStatus,
-    turnEvent,
   } = useWebSocket({
     onAudio: appendAudio,
     onBargeIn: stopAudio,
@@ -80,7 +71,6 @@ export default function App() {
     onTtsStart: setSampleRate,
   });
   const {
-    error: microphoneError,
     start: startMicrophone,
     status: microphoneStatus,
     stop: stopMicrophone,
@@ -360,36 +350,7 @@ export default function App() {
                 </div>
               </form>
 
-              <details className="technical-status">
-                <summary>Connection details</summary>
-                <div className="technical-grid">
-                  <span>
-                    Microphone: {microphoneStatus.replaceAll("_", " ")}
-                  </span>
-                  <span>STT: {sttStatus}</span>
-                  <span>Turn: {turnEvent}</span>
-                  <span>OpenAI: {llmStatus}</span>
-                  <span>TTS: {ttsStatus}</span>
-                  <span>Playback: {playbackStatus}</span>
-                  <span>Stage: {conversationStage.replaceAll("_", " ")}</span>
-                  <span>Backend: {backendStatus}</span>
-                  <span>{audioStats.chunks} audio chunks</span>
-                </div>
-              </details>
-
-              <button
-                className="disconnect-button"
-                type="button"
-                onClick={stopCurrentChat}
-                disabled={isRecording}
-              >
-                Disconnect
-              </button>
             </>
-          )}
-
-          {(websocketError || microphoneError) && (
-            <p className="error-message">{websocketError || microphoneError}</p>
           )}
         </section>
       </section>

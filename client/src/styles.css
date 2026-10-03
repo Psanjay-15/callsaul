@@ -510,47 +510,6 @@ h1 {
   font-weight: 750;
 }
 
-.technical-status {
-  margin-top: 0.8rem;
-  color: #68766d;
-  font-size: 0.72rem;
-}
-
-.technical-status summary {
-  cursor: pointer;
-  font-weight: 750;
-}
-
-.technical-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0.45rem;
-  margin-top: 0.65rem;
-  border-radius: 0.7rem;
-  padding: 0.7rem;
-  background: #f3f7f4;
-  text-transform: capitalize;
-}
-
-.disconnect-button {
-  align-self: flex-end;
-  margin-top: 0.8rem;
-  padding: 0.3rem;
-  color: #8a4c4c;
-  background: transparent;
-  font-size: 0.72rem;
-  font-weight: 750;
-}
-
-.error-message {
-  margin: 0.8rem 0 0;
-  border-radius: 0.7rem;
-  padding: 0.7rem;
-  color: #a63737;
-  background: #fff0f0;
-  font-size: 0.82rem;
-}
-
 @media (max-width: 800px) {
   .page-shell {
     padding: 0;
@@ -586,9 +545,6 @@ h1 {
     height: 24rem;
   }
 
-  .technical-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 
 @media (max-width: 520px) {
@@ -606,7 +562,4 @@ h1 {
     flex-direction: column;
   }
 
-  .technical-grid {
-    grid-template-columns: 1fr;
-  }
 }
